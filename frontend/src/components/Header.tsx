@@ -10,6 +10,7 @@ interface HeaderProps {
   onRefreshHealth?: () => void;
   onOpenGuide: () => void;
   onOpenLiveCamera?: () => void;
+  onOpenBackendModal?: () => void;
   isProcessing: boolean;
 }
 
@@ -19,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   health,
   onOpenGuide,
   onOpenLiveCamera,
+  onOpenBackendModal,
   isProcessing
 }) => {
   const isOnline = health && health.status === 'ok';
@@ -102,18 +104,34 @@ export const Header: React.FC<HeaderProps> = ({
           <span>Capture Guide</span>
         </button>
 
-        {/* System Health Status Pill */}
+        {/* System Health Status Pill (Clickable to manage backend connection) */}
         {isOnline ? (
-          <div className="status-pill online" title={`Backend connected: ${health?.app_name} (OpenCV ${health?.opencv_version})`} role="status" aria-label="Backend status: Online">
+          <button
+            type="button"
+            className="status-pill online"
+            onClick={onOpenBackendModal}
+            title={`Backend connected: ${health?.app_name} (OpenCV ${health?.opencv_version}). Click to manage.`}
+            role="status"
+            aria-label="Backend status: Online"
+            style={{ cursor: 'pointer', background: 'none', border: '1px solid rgba(16, 185, 129, 0.4)' }}
+          >
             <span className="status-indicator-dot" aria-hidden="true"></span>
             <span>Ready</span>
-          </div>
-        ) : health?.status === 'error' ? (
-          <div className="status-pill warning" title={health?.message || 'Backend offline'} role="alert" aria-label="Backend status: Offline">
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="status-pill warning"
+            onClick={onOpenBackendModal}
+            title={health?.message || 'Backend offline. Click to connect or view setup instructions.'}
+            role="alert"
+            aria-label="Backend status: Offline"
+            style={{ cursor: 'pointer', background: 'none', border: '1px solid rgba(244, 63, 94, 0.4)' }}
+          >
             <AlertCircle size={13} aria-hidden="true" />
-            <span>Offline</span>
-          </div>
-        ) : null}
+            <span>Offline (Click to Connect)</span>
+          </button>
+        )}
       </div>
     </header>
   );

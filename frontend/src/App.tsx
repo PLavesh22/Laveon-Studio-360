@@ -9,6 +9,7 @@ import { PanoramaViewer } from './components/PanoramaViewer';
 import { CameraGuideModal } from './components/CameraGuideModal';
 import { RecordingGuideModal } from './components/RecordingGuideModal';
 import { FFmpegGuideModal } from './components/FFmpegGuideModal';
+import { BackendModal } from './components/BackendModal';
 import type {
   HealthData,
   ProcessingSettings as SettingsType,
@@ -61,6 +62,7 @@ export const App: React.FC = () => {
   // Modals
   const [guideOpen, setGuideOpen] = useState(false);
   const [ffmpegModalOpen, setFFmpegModalOpen] = useState(false);
+  const [backendModalOpen, setBackendModalOpen] = useState(false);
 
   // Fetch backend health on mount
   const loadHealth = useCallback(async () => {
@@ -235,6 +237,7 @@ export const App: React.FC = () => {
         onRefreshHealth={loadHealth}
         onOpenGuide={() => setGuideOpen(true)}
         onOpenLiveCamera={() => setCameraModalOpen(true)}
+        onOpenBackendModal={() => setBackendModalOpen(true)}
         isProcessing={isProcessing}
       />
 
@@ -375,6 +378,14 @@ export const App: React.FC = () => {
         isOpen={ffmpegModalOpen}
         onClose={() => setFFmpegModalOpen(false)}
         health={health}
+      />
+
+      {/* Backend Connection Modal */}
+      <BackendModal
+        isOpen={backendModalOpen}
+        onClose={() => setBackendModalOpen(false)}
+        health={health}
+        onHealthUpdate={(h) => setHealth(h)}
       />
     </div>
   );

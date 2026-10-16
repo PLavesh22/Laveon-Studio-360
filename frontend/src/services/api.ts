@@ -1,9 +1,28 @@
 import type { HealthData, ProcessingSettings, StitchResult, PhotoCheckResult } from '../types';
 
-const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '')) || '';
+export function getApiBase(): string {
+  if (typeof window !== 'undefined') {
+    const custom = localStorage.getItem('LAVEON_BACKEND_URL');
+    if (custom && custom.trim()) {
+      return custom.trim().replace(/\/$/, '');
+    }
+  }
+  const envBase = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '');
+  return envBase || '';
+}
+
+export function setCustomApiBase(url: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (url && url.trim()) {
+    localStorage.setItem('LAVEON_BACKEND_URL', url.trim().replace(/\/$/, ''));
+  } else {
+    localStorage.removeItem('LAVEON_BACKEND_URL');
+  }
+}
 
 export async function fetchHealth(): Promise<HealthData> {
-  const res = await fetch(`${API_BASE}/api/health`);
+  const base = getApiBase();
+  const res = await fetch(`${base}/api/health`);
   if (!res.ok) {
     throw new Error(`Health check failed with status: ${res.status}`);
   }
@@ -14,13 +33,14 @@ export async function checkPhotos(
   photos: File[],
   minBlurThreshold: number = 15.0
 ): Promise<PhotoCheckResult> {
+  const base = getApiBase();
   const formData = new FormData();
   photos.forEach((photo) => {
     formData.append('photos', photo);
   });
   formData.append('min_blur_threshold', minBlurThreshold.toString());
 
-  const res = await fetch(`${API_BASE}/api/check-photos`, {
+  const res = await fetch(`${base}/api/check-photos`, {
     method: 'POST',
     body: formData,
   });
@@ -36,6 +56,7 @@ export async function processPhotos(
   photos: File[],
   settings: ProcessingSettings
 ): Promise<StitchResult> {
+  const base = getApiBase();
   const formData = new FormData();
   photos.forEach((photo) => {
     formData.append('photos', photo);
@@ -44,7 +65,7 @@ export async function processPhotos(
   formData.append('scale_width', (settings.scale_width || 1920).toString());
   formData.append('stitching_mode', settings.stitching_mode || 'full_sphere');
 
-  const res = await fetch(`${API_BASE}/api/process-photos`, {
+  const res = await fetch(`${base}/api/process-photos`, {
     method: 'POST',
     body: formData,
   });
@@ -57,7 +78,8 @@ export async function processPhotos(
 }
 
 export async function loadSamplePhotos(): Promise<File[]> {
-  const metaRes = await fetch(`${API_BASE}/api/sample-photos`);
+  const base = getApiBase();
+  const metaRes = await fetch(`${base}/api/sample-photos`);
   if (!metaRes.ok) {
     throw new Error('Failed to load sample photos list from backend.');
   }
@@ -66,7 +88,7 @@ export async function loadSamplePhotos(): Promise<File[]> {
 
   const photoFiles: File[] = [];
   for (const name of fileNames) {
-    const fileRes = await fetch(`${API_BASE}/api/sample-photos/${name}`);
+    const fileRes = await fetch(`${base}/api/sample-photos/${name}`);
     if (fileRes.ok) {
       const blob = await fileRes.blob();
       photoFiles.push(new File([blob], name, { type: 'image/jpeg' }));
@@ -84,6 +106,7 @@ export async function processVideo(
   videoFile: File,
   settings: ProcessingSettings
 ): Promise<StitchResult> {
+  const base = getApiBase();
   const formData = new FormData();
   formData.append('video', videoFile);
   formData.append('sample_interval_sec', settings.sample_interval_sec.toString());
@@ -95,13 +118,12 @@ export async function processVideo(
     formData.append('scale_width', settings.scale_width.toString());
   }
 
-  const res = await fetch(`${API_BASE}/api/process-video`, {
+  const res = await fetch(`${base}/api/process-video`, {
     method: 'POST',
     body: formData,
   });
 
   const data = await res.json();
-
   if (!res.ok) {
     const errorMsg = data.detail || `Server error (${res.status})`;
     throw new Error(errorMsg);
@@ -111,7 +133,8 @@ export async function processVideo(
 }
 
 export async function fetchResult(resultId: string): Promise<StitchResult> {
-  const res = await fetch(`${API_BASE}/api/results/${resultId}`);
+  const base = getApiBase();
+  const res = await fetch(`${base}/api/results/${resultId}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `Failed to fetch result ${resultId}`);
@@ -120,7 +143,8 @@ export async function fetchResult(resultId: string): Promise<StitchResult> {
 }
 
 export async function loadSampleVideoFile(): Promise<File> {
-  const res = await fetch(`${API_BASE}/api/sample-video`);
+  const base = getApiBase();
+  const res = await fetch(`${base}/api/sample-video`);
   if (!res.ok) {
     throw new Error('Failed to load sample rotating camera video from backend.');
   }
@@ -129,11 +153,13 @@ export async function loadSampleVideoFile(): Promise<File> {
 }
 
 export function getPreviewUrl(resultId: string): string {
-  return `${API_BASE}/api/results/${resultId}/preview`;
+  const base = getApiBase();
+  return `${base}/api/results/${resultId}/preview`;
 }
 
 export function getDownloadUrl(resultId: string): string {
-  return `${API_BASE}/api/results/${resultId}/download`;
+  const base = getApiBase();
+  return `${base}/api/results/${resultId}/download`;
 }
 
 export async function downloadPanorama(resultId: string): Promise<void> {
