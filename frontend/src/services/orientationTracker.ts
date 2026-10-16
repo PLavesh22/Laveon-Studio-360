@@ -16,12 +16,14 @@ export interface OrientationData {
 }
 
 export type OrientationListener = (data: OrientationData) => void;
+export type SensorStatus = 'checking' | 'active' | 'permission_needed' | 'unsupported';
 
 export class OrientationTracker {
   private listeners: Set<OrientationListener> = new Set();
   private baselineAlpha: number | null = null;
   private isListening = false;
   private hasSensor = false;
+  private lastRawAlpha: number = 0;
 
   // Smoothed orientation state (EMA)
   private smoothedYaw = 0;
@@ -39,6 +41,7 @@ export class OrientationTracker {
     }
 
     this.hasSensor = true;
+    this.lastRawAlpha = e.alpha;
 
     // 1. Screen orientation compensation
     const screenAngle = this.getScreenOrientationAngle();
@@ -125,11 +128,27 @@ export class OrientationTracker {
         const response = await (window as any).DeviceOrientationEvent.requestPermission();
         return response === 'granted';
       }
-      return true; // Not required on Android or non-iOS
+      return true; // Not required on Android or desktop
     } catch (err) {
       console.warn('Orientation permission error:', err);
       return false;
     }
+  }
+
+  /**
+   * Checks current sensor availability status
+   */
+  public getSensorStatus(): SensorStatus {
+    if (typeof window === 'undefined' || !window.DeviceOrientationEvent) {
+      return 'unsupported';
+    }
+    if (typeof (window as any)?.DeviceOrientationEvent?.requestPermission === 'function' && !this.hasSensor) {
+      return 'permission_needed';
+    }
+    if (this.hasSensor) {
+      return 'active';
+    }
+    return 'checking';
   }
 
   /**
@@ -138,6 +157,8 @@ export class OrientationTracker {
   public calibrate(currentAlpha?: number): void {
     if (currentAlpha !== undefined) {
       this.baselineAlpha = currentAlpha;
+    } else if (this.lastRawAlpha !== 0) {
+      this.baselineAlpha = this.lastRawAlpha;
     } else {
       this.baselineAlpha = this.smoothedYaw;
     }
@@ -148,9 +169,16 @@ export class OrientationTracker {
   /**
    * Re-centers the baseline yaw to current heading
    */
-  public recenter(headingAlpha: number): void {
-    this.baselineAlpha = headingAlpha;
+  public recenter(headingAlpha?: number): void {
+    if (headingAlpha !== undefined) {
+      this.baselineAlpha = headingAlpha;
+    } else if (this.lastRawAlpha !== 0) {
+      this.baselineAlpha = this.lastRawAlpha;
+    } else {
+      this.baselineAlpha = 0;
+    }
     this.smoothedYaw = 0;
+    this.isFirstReading = true;
   }
 
   /**

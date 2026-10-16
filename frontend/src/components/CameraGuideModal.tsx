@@ -17,8 +17,10 @@ import {
   CheckCircle2,
   Circle,
   Layers,
-  ArrowRight
+  ArrowRight,
+  HelpCircle,
 } from 'lucide-react';
+import { globalCameraManager } from '../services/cameraManager';
 import {
   globalOrientationTracker,
   type OrientationData
@@ -29,14 +31,16 @@ import {
   type CaptureMode,
   type RotationStepAngle
 } from '../services/targetPlanner';
-import {
-  AlignmentValidator
-} from '../services/alignmentValidator';
+import { AlignmentValidator } from '../services/alignmentValidator';
+import { CaptureCountdown } from '../services/captureCountdown';
+import { computeDirectionalGuidance } from '../services/directionalGuidance';
 import {
   ImageQualityAnalyzer,
   type QualityReport
 } from '../services/imageQualityAnalyzer';
 import { feedback } from '../utils/feedback';
+import { CameraOnboarding } from './CameraOnboarding';
+import { CameraHelpModal } from './CameraHelpModal';
 
 interface CameraGuideModalProps {
   isOpen: boolean;
@@ -49,10 +53,20 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
   onClose,
   onAddCapturedPhotos,
 }) => {
-  // Capture configuration state
+  // 1. Onboarding & Help State
+  const [hasSeenOnboarding, setHasSeenOnboarding] = useState<boolean>(() => {
+    if (typeof localStorage !== 'undefined') {
+      return localStorage.getItem('laveon_onboarding_completed') === 'true';
+    }
+    return false;
+  });
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(true);
+  const [showHelpModal, setShowHelpModal] = useState<boolean>(false);
+
+  // 2. Capture Configuration State
   const [captureMode, setCaptureMode] = useState<CaptureMode>('horizontal_360');
-  const [stepAngle, setStepAngle] = useState<RotationStepAngle>(36); // 36° = 10 shots (standard ~35% overlap)
-  const [overlapPct, setOverlapPct] = useState<number>(0.35); // 35% overlap default
+  const [stepAngle, setStepAngle] = useState<RotationStepAngle>(36); // 36° = 10 shots (approx 35% overlap)
+  const [overlapPct, setOverlapPct] = useState<number>(0.35);
 
   // Planner instance
   const planner = useMemo(() => {
@@ -73,43 +87,6 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
   // Quality Analyzer instance
   const qualityAnalyzer = useMemo(() => new ImageQualityAnalyzer(), []);
   const [lastQualityReport, setLastQualityReport] = useState<QualityReport | null>(null);
-
-  // Regenerate targets whenever mode or step angle changes
-  const handleModeChange = (newMode: CaptureMode) => {
-    setCaptureMode(newMode);
-    const newPlanner = new TargetPlanner({
-      mode: newMode,
-      stepAngle,
-      overlapPercentage: overlapPct,
-      hfov: 60,
-      vfov: 75,
-    });
-    setTargets(newPlanner.generateTargets());
-    setActiveTargetIndex(0);
-    setCapturedHistory([]);
-    qualityAnalyzer.reset();
-    setLastQualityReport(null);
-  };
-
-  const handleStepAngleChange = (newStep: RotationStepAngle) => {
-    setStepAngle(newStep);
-    // Approximate overlap corresponding to step
-    const computedOverlap = newStep === 30 ? 0.45 : newStep === 36 ? 0.35 : 0.28;
-    setOverlapPct(computedOverlap);
-
-    const newPlanner = new TargetPlanner({
-      mode: captureMode,
-      stepAngle: newStep,
-      overlapPercentage: computedOverlap,
-      hfov: 60,
-      vfov: 75,
-    });
-    setTargets(newPlanner.generateTargets());
-    setActiveTargetIndex(0);
-    setCapturedHistory([]);
-    qualityAnalyzer.reset();
-    setLastQualityReport(null);
-  };
 
   // Hardware Camera State
   const [cameraActive, setCameraActive] = useState(false);
@@ -132,127 +109,48 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     screenAngle: 0,
   });
   const [hasOrientationSensor, setHasOrientationSensor] = useState(false);
-  const [sensorPermissionNeeded, setSensorPermissionNeeded] = useState<boolean>(() => {
-    return typeof (window as any)?.DeviceOrientationEvent?.requestPermission === 'function';
-  });
-
-  // Controls State
-  const [isAutoCapturePaused, setIsAutoCapturePaused] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
-
-  // Alignment Validator (strict ±3.0° tolerance, 600ms hold window between 500-800ms)
-  const validator = useMemo(
-    () =>
-      new AlignmentValidator({
-        toleranceDegrees: 3.0,
-        rollToleranceDegrees: 12.0,
-        stabilityHoldMs: 600, // 600ms steady hold
-        maxAngularVelocity: 5.0, // Low rotational movement
-      }),
-    []
+  const [sensorStatus, setSensorStatus] = useState<'checking' | 'active' | 'permission_needed' | 'unsupported'>(
+    () => globalOrientationTracker.getSensorStatus()
   );
 
-  const [holdProgress, setHoldProgress] = useState(0);
-  const [alignmentStatus, setAlignmentStatus] = useState<'unaligned' | 'holding' | 'aligned_green'>('unaligned');
+  // Controls & Feedback State
+  const [isAutoCapturePaused, setIsAutoCapturePaused] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => feedback.isSoundEnabled());
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => feedback.isVoiceEnabled());
+
+  // Countdown & Guidance Transient States
+  const [countdownSeconds, setCountdownSeconds] = useState<number>(3);
+  const [countdownProgress, setCountdownProgress] = useState<number>(0);
+  const [isCountdownActive, setIsCountdownActive] = useState<boolean>(false);
+  const [recentlyCaptured, setRecentlyCaptured] = useState<boolean>(false);
+  const [phoneMovedWarning, setPhoneMovedWarning] = useState<boolean>(false);
+  const lastSecondRef = useRef<number>(3);
+
+  // Modular Services instances
+  const validator = useMemo(() => new AlignmentValidator({ toleranceDegrees: 3.5 }), []);
+  const countdownController = useMemo(() => new CaptureCountdown(3000), []);
 
   // DOM Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const nativeInputRef = useRef<HTMLInputElement | null>(null);
   const captureLockRef = useRef(false);
 
   const activeTarget = targets[activeTargetIndex] || targets[0];
   const capturedCount = targets.filter((t) => t.isCaptured).length;
-  const progressPct = targets.length > 0 ? Math.round((capturedCount / targets.length) * 100) : 0;
   const isRotationComplete = capturedCount === targets.length;
 
-  // Project active target onto camera screen space
-  const projection = useMemo(() => {
-    if (!activeTarget) {
-      return {
-        screenX: 50,
-        screenY: 50,
-        isInView: true,
-        deltaYaw: 0,
-        deltaPitch: 0,
-        angularDistance: 0,
-        edgeArrowAngle: 0,
-        directionHint: 'Hold steady',
-        degreesToTarget: 0,
-        guidanceText: 'Hold steady',
-      };
-    }
-    return planner.projectTarget(activeTarget, orientation.yaw, orientation.pitch);
-  }, [activeTarget, orientation.yaw, orientation.pitch, planner]);
-
-  // Clean stop camera stream
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    setCameraActive(false);
-  }, []);
-
-  // Multi-tier, fault-tolerant camera startup
+  // Multi-tier camera startup via CameraManager
   const startCamera = useCallback(async (overrideDeviceId?: string) => {
     setCameraError(null);
     setIsStartingCamera(true);
 
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error(
-          'In-browser camera access requires HTTPS or localhost. If testing over a Wi-Fi IP, use localhost port-forwarding or use the "Snap with Device Camera" option.'
-        );
-      }
-
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-
-      const targetDeviceId = overrideDeviceId !== undefined ? overrideDeviceId : selectedDeviceId;
-      let stream: MediaStream | null = null;
-
-      if (targetDeviceId) {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: targetDeviceId } },
-          audio: false,
-        });
-      } else {
-        try {
-          // Tier 1: Rear environment camera with HD resolution
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-            },
-            audio: false,
-          });
-        } catch {
-          try {
-            // Tier 2: Basic environment camera
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: { ideal: 'environment' } },
-              audio: false,
-            });
-          } catch {
-            // Tier 3: Universal fallback (webcam, laptop camera)
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: true,
-              audio: false,
-            });
-          }
-        }
-      }
-
-      streamRef.current = stream;
+      const res = await globalCameraManager.startStream(overrideDeviceId || selectedDeviceId);
       setCameraActive(true);
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+        videoRef.current.srcObject = res.stream;
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play().catch((playErr) => {
             console.warn('Video play prevented by browser:', playErr);
@@ -260,18 +158,16 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
         };
       }
 
-      try {
-        const allDevices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = allDevices.filter((d) => d.kind === 'videoinput');
-        setAvailableCameras(videoDevices);
-      } catch (enumErr) {
-        console.warn('Camera enumeration error:', enumErr);
+      const devices = await globalCameraManager.getAvailableCameras();
+      setAvailableCameras(devices);
+      if (res.deviceId) {
+        setSelectedDeviceId(res.deviceId);
       }
     } catch (err: any) {
       console.error('Camera access error:', err);
       let errorMsg = 'Could not access camera.';
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        errorMsg = 'Camera permission was denied. Please allow camera access in your browser address bar.';
+        errorMsg = 'Camera permission denied. Click the lock or camera icon in your address bar to allow.';
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         errorMsg = 'No camera hardware detected. Connect a camera or use "Snap with Device Camera".';
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
@@ -286,56 +182,109 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     }
   }, [selectedDeviceId]);
 
+  // Clean stop camera stream
+  const stopCamera = useCallback(() => {
+    globalCameraManager.stopStream();
+    setCameraActive(false);
+    feedback.cancelSpeech();
+  }, []);
+
   // Request iOS 13+ sensor permissions
   const requestOrientationPermission = async () => {
     const granted = await globalOrientationTracker.requestPermission();
     if (granted) {
-      setSensorPermissionNeeded(false);
       setHasOrientationSensor(true);
+      setSensorStatus('active');
       globalOrientationTracker.start();
+    } else {
+      setSensorStatus('unsupported');
     }
   };
 
   // Re-calibrate relative 0° heading to current phone direction
-  const handleStartCaptureOrRecenter = () => {
-    globalOrientationTracker.recenter(orientation.rawAlpha);
-    validator.resetHold();
+  const handleRecenter = useCallback(() => {
+    globalOrientationTracker.recenter();
+    countdownController.resetForNextTarget();
+    setIsCountdownActive(false);
+    setCountdownProgress(0);
+    setPhoneMovedWarning(false);
     feedback.playLockTick();
+  }, [countdownController]);
+
+  // Handle Mode Change (Horizontal Ring vs Full Sphere)
+  const handleModeChange = (newMode: CaptureMode) => {
+    setCaptureMode(newMode);
+    const newPlanner = new TargetPlanner({
+      mode: newMode,
+      stepAngle,
+      overlapPercentage: overlapPct,
+      hfov: 60,
+      vfov: 75,
+    });
+    setTargets(newPlanner.generateTargets());
+    setActiveTargetIndex(0);
+    setCapturedHistory([]);
+    qualityAnalyzer.reset();
+    setLastQualityReport(null);
+    countdownController.resetForNextTarget();
   };
 
-  // Subscribe to orientation tracker
-  useEffect(() => {
-    if (!isOpen) return;
+  const handleStepAngleChange = (newStep: RotationStepAngle) => {
+    setStepAngle(newStep);
+    const computedOverlap = newStep === 30 ? 0.45 : newStep === 36 ? 0.35 : 0.28;
+    setOverlapPct(computedOverlap);
 
-    const unsubscribe = globalOrientationTracker.subscribe((data) => {
-      setHasOrientationSensor(true);
-      setOrientation(data);
+    const newPlanner = new TargetPlanner({
+      mode: captureMode,
+      stepAngle: newStep,
+      overlapPercentage: computedOverlap,
+      hfov: 60,
+      vfov: 75,
     });
+    setTargets(newPlanner.generateTargets());
+    setActiveTargetIndex(0);
+    setCapturedHistory([]);
+    qualityAnalyzer.reset();
+    setLastQualityReport(null);
+    countdownController.resetForNextTarget();
+  };
 
-    return () => {
-      unsubscribe();
-      validator.resetHold();
-    };
-  }, [isOpen, validator]);
+  // Directional guidance calculation (Single instruction at a time, no jargon)
+  const guidance = useMemo(() => {
+    return computeDirectionalGuidance({
+      target: activeTarget,
+      currentYaw: orientation.yaw,
+      currentPitch: orientation.pitch,
+      currentRoll: orientation.roll,
+      angularVelocity: 0,
+      isCountdownActive,
+      countdownSeconds,
+      isCapturing,
+      recentlyCaptured,
+      phoneMovedWarning,
+      qualityWarning: lastQualityReport?.warnings?.[0],
+      capturedCount,
+      totalCount: targets.length,
+      hfov: 60,
+      vfov: 75,
+      toleranceDegrees: 3.5,
+    });
+  }, [
+    activeTarget,
+    orientation.yaw,
+    orientation.pitch,
+    orientation.roll,
+    isCountdownActive,
+    countdownSeconds,
+    isCapturing,
+    recentlyCaptured,
+    phoneMovedWarning,
+    lastQualityReport?.warnings,
+    capturedCount,
+    targets.length,
+  ]);
 
-  // Lifecycle start/stop camera
-  useEffect(() => {
-    let active = true;
-    if (isOpen) {
-      queueMicrotask(() => {
-        if (active) void startCamera();
-      });
-    } else {
-      queueMicrotask(() => {
-        stopCamera();
-      });
-    }
-    return () => {
-      active = false;
-    };
-  }, [isOpen, startCamera, stopCamera]);
-
-  // Capture of active target with real image quality and overlap analysis
+  // Capture current target frame with computer vision quality & overlap validation
   const captureCurrentTarget = useCallback(() => {
     if (!videoRef.current || !cameraActive || isCapturing || captureLockRef.current) return;
 
@@ -361,9 +310,9 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // Run real computer vision analysis: blur, exposure, and adjacent-frame overlap
-    const qualityReport = qualityAnalyzer.analyzeFrame(canvas, overlapPct);
-    setLastQualityReport(qualityReport);
+    // Frame quality check (blur, exposure, visual overlap)
+    const report = qualityAnalyzer.analyzeFrame(canvas, overlapPct);
+    setLastQualityReport(report);
 
     canvas.toBlob(
       (blob) => {
@@ -386,9 +335,9 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                   isCaptured: true,
                   photoFile: file,
                   previewUrl,
-                  blurScore: qualityReport.blurScore,
-                  exposureScore: qualityReport.exposureScore,
-                  overlapScore: qualityReport.overlapScore,
+                  blurScore: report.blurScore,
+                  exposureScore: report.exposureScore,
+                  overlapScore: report.overlapScore,
                   orientationMetadata: {
                     capturedYaw: Math.round(orientation.yaw),
                     capturedPitch: Math.round(orientation.pitch),
@@ -401,9 +350,19 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
         );
 
         setCapturedHistory((prev) => [...prev, activeTargetIndex]);
-        validator.onCaptureComplete();
+        countdownController.resetForNextTarget();
+        setIsCountdownActive(false);
+        setCountdownProgress(0);
 
-        // Advance automatically to the next uncaptured target
+        // Voice feedback: "Position X of Y captured."
+        const newCapturedTotal = capturedCount + 1;
+        feedback.speak(`Position ${newCapturedTotal} of ${targets.length} captured.`);
+
+        // Flag recently captured for 2s confirmation state
+        setRecentlyCaptured(true);
+        setTimeout(() => setRecentlyCaptured(false), 2200);
+
+        // Automatically advance to the next uncaptured target
         const nextIndex = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
         if (nextIndex !== -1) {
           setActiveTargetIndex(nextIndex);
@@ -416,8 +375,6 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
 
         setIsCapturing(false);
         captureLockRef.current = false;
-        setHoldProgress(0);
-        setAlignmentStatus('unaligned');
       },
       'image/jpeg',
       0.95
@@ -426,6 +383,8 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     activeTarget,
     activeTargetIndex,
     cameraActive,
+    capturedCount,
+    countdownController,
     isCapturing,
     orientation.pitch,
     orientation.roll,
@@ -433,10 +392,9 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     overlapPct,
     qualityAnalyzer,
     targets,
-    validator,
   ]);
 
-  // Main alignment & 500-800ms stability auto-capture loop
+  // Main Alignment & 3-Second Stability Auto-Capture Loop
   useEffect(() => {
     if (
       !hasOrientationSensor ||
@@ -445,41 +403,128 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
       isCapturing ||
       captureLockRef.current
     ) {
-      validator.resetHold();
-      setHoldProgress(0);
-      setAlignmentStatus('unaligned');
+      countdownController.resetForNextTarget();
+      setIsCountdownActive(false);
+      setCountdownProgress(0);
       return;
     }
 
+    // Evaluate alignment tolerance and stability
+    // Shortest angular distance between target and current heading
+    let deltaYaw = ((activeTarget.targetYaw - orientation.yaw + 540) % 360) - 180;
+    let deltaPitch = activeTarget.targetPitch - orientation.pitch;
+    const angularDist = Math.hypot(deltaYaw, deltaPitch);
+
     const evaluation = validator.evaluate(
-      projection.angularDistance,
+      angularDist,
       orientation.roll,
       isCapturing,
       isAutoCapturePaused,
       hasOrientationSensor
     );
 
-    setAlignmentStatus(evaluation.status);
-    setHoldProgress(evaluation.holdProgressPct);
+    // Update 3-second countdown
+    const countdownState = countdownController.update(evaluation.isReadyForCountdown);
 
-    if (evaluation.status === 'holding' && holdProgress === 0) {
-      feedback.triggerHapticLock();
+    setIsCountdownActive(countdownState.isActive);
+    setCountdownSeconds(countdownState.secondsRemaining);
+    setCountdownProgress(countdownState.progressRatio);
+
+    // Sound and voice ticks
+    if (countdownState.isActive) {
+      if (countdownState.secondsRemaining !== lastSecondRef.current) {
+        lastSecondRef.current = countdownState.secondsRemaining;
+        feedback.playCountdownBeep(countdownState.secondsRemaining);
+        if (countdownState.secondsRemaining === 3) {
+          feedback.triggerHapticLock();
+          feedback.speak('Perfect! Hold still.');
+        }
+      }
+    } else {
+      lastSecondRef.current = 3;
     }
 
-    if (evaluation.canCapture) {
+    // Phone moved cancellation
+    if (countdownState.wasCanceled && countdownState.cancelReason === 'phone_moved') {
+      queueMicrotask(() => {
+        setPhoneMovedWarning(true);
+        feedback.speak('Your phone moved. Please try again.');
+        setTimeout(() => setPhoneMovedWarning(false), 2400);
+      });
+    }
+
+    // Countdown reached zero with stability maintained
+    if (countdownState.shouldTriggerCapture) {
       captureCurrentTarget();
     }
   }, [
-    activeTarget.isCaptured,
+    activeTarget,
     captureCurrentTarget,
+    countdownController,
     hasOrientationSensor,
-    holdProgress,
     isAutoCapturePaused,
     isCapturing,
+    orientation.pitch,
     orientation.roll,
-    projection.angularDistance,
+    orientation.yaw,
     validator,
   ]);
+
+  // Subscribe to orientation tracker
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const unsubscribe = globalOrientationTracker.subscribe((data) => {
+      setHasOrientationSensor(true);
+      setOrientation(data);
+      setSensorStatus('active');
+    });
+
+    return () => {
+      unsubscribe();
+      countdownController.resetForNextTarget();
+    };
+  }, [countdownController, isOpen]);
+
+  // Lifecycle start/stop camera
+  useEffect(() => {
+    let active = true;
+    if (isOpen) {
+      // Start camera automatically
+      queueMicrotask(() => {
+        if (active) {
+          void startCamera();
+          setShowOnboarding(!hasSeenOnboarding);
+        }
+      });
+    } else {
+      queueMicrotask(() => {
+        stopCamera();
+      });
+    }
+    return () => {
+      active = false;
+    };
+  }, [hasSeenOnboarding, isOpen, startCamera, stopCamera]);
+
+  // Onboarding handlers
+  const handleStartFromOnboarding = () => {
+    setShowOnboarding(false);
+    setHasSeenOnboarding(true);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('laveon_onboarding_completed', 'true');
+    }
+    handleRecenter();
+  };
+
+  const handleSkipTutorial = () => {
+    setShowOnboarding(false);
+    setHasSeenOnboarding(true);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('laveon_onboarding_completed', 'true');
+    }
+    handleRecenter();
+  };
 
   // Undo the last captured photo
   const handleUndoLastCapture = () => {
@@ -505,7 +550,9 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
 
     setCapturedHistory((prev) => prev.slice(0, prev.length - 1));
     setActiveTargetIndex(lastCapturedIdx);
-    validator.resetHold();
+    countdownController.resetForNextTarget();
+    setIsCountdownActive(false);
+    setCountdownProgress(0);
     setLastQualityReport(null);
     feedback.playLockTick();
   };
@@ -529,7 +576,9 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
       )
     );
     setActiveTargetIndex(index);
-    validator.resetHold();
+    countdownController.resetForNextTarget();
+    setIsCountdownActive(false);
+    setCountdownProgress(0);
     setLastQualityReport(null);
   };
 
@@ -597,7 +646,9 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     setCapturedHistory([]);
     qualityAnalyzer.reset();
     setLastQualityReport(null);
-    validator.resetHold();
+    countdownController.resetForNextTarget();
+    setIsCountdownActive(false);
+    setCountdownProgress(0);
   };
 
   if (!isOpen) return null;
@@ -623,7 +674,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
             </div>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                <h2 className="modal-title">360° Guided Camera Capture</h2>
+                <h2 className="modal-title">Guided Camera Assistant</h2>
                 <span
                   className="badge"
                   style={{
@@ -637,14 +688,27 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                 </span>
               </div>
               <p className="modal-subtitle">
-                Align the rectangular target with the center reticle. Steady hold turns green and captures automatically.
+                Follow the arrow to align the orange circle with the center ring. Hold still for automatic capture.
               </p>
             </div>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {/* Help Button (Plain language explanation of current step) */}
+            <button
+              type="button"
+              className="btn btn-sm btn-secondary"
+              style={{ fontSize: '0.75rem', padding: '6px 10px', height: '32px' }}
+              onClick={() => setShowHelpModal(true)}
+              title="Show step-by-step help in plain language"
+            >
+              <HelpCircle size={15} color="#00d4ff" />
+              <span>Help</span>
+            </button>
+
             {/* Mode Switcher */}
             <button
+              type="button"
               className="btn btn-sm btn-secondary"
               style={{ fontSize: '0.75rem', padding: '6px 10px', height: '32px' }}
               onClick={() => handleModeChange(captureMode === 'horizontal_360' ? 'full_sphere' : 'horizontal_360')}
@@ -660,7 +724,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
           </div>
         </div>
 
-        {/* Live Viewfinder & Photo Sphere HUD */}
+        {/* Live Viewfinder & Guided Camera HUD */}
         <div className={`camera-viewfinder-wrapper ${isFlashing ? 'camera-shutter-flash' : ''}`}>
           <video
             ref={videoRef}
@@ -671,8 +735,22 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
           />
           <canvas ref={canvasRef} style={{ display: 'none' }} />
 
+          {/* Onboarding Overlay Flow (Section A) */}
+          {showOnboarding && (
+            <CameraOnboarding
+              cameraReady={cameraActive}
+              cameraError={cameraError}
+              sensorStatus={sensorStatus}
+              onRequestCamera={() => startCamera()}
+              onRequestSensors={requestOrientationPermission}
+              onStartCapture={handleStartFromOnboarding}
+              onSkipTutorial={handleSkipTutorial}
+              onClose={onClose}
+            />
+          )}
+
           {/* Fallback Screen when Camera is Stopped or Initializing */}
-          {!cameraActive && (
+          {!cameraActive && !showOnboarding && (
             <div className="camera-start-screen">
               <div className="camera-start-card">
                 <div style={{ position: 'relative', display: 'inline-block' }}>
@@ -687,11 +765,11 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                   )}
                 </div>
 
-                <h3>{isStartingCamera ? 'Connecting to Camera...' : 'Camera Access'}</h3>
+                <h3>{isStartingCamera ? 'Connecting to Camera…' : 'Camera Access Needed'}</h3>
                 <p>
                   {isStartingCamera
-                    ? 'Requesting live camera stream. If prompted, please click "Allow" in your browser.'
-                    : 'To capture authentic 360° photos with live target tracking, allow camera access or snap directly with your device camera.'}
+                    ? 'Connecting to your device camera stream. Click "Allow" if prompted by your browser.'
+                    : 'To provide live guided tracking, allow camera access or snap directly using your device camera.'}
                 </p>
 
                 {cameraError && (
@@ -719,12 +797,12 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                     {isStartingCamera ? (
                       <>
                         <RefreshCw size={18} className="animate-spin" />
-                        <span>Starting Camera...</span>
+                        <span>Starting Camera…</span>
                       </>
                     ) : (
                       <>
                         <Camera size={18} />
-                        <span>{cameraError ? 'Retry Camera' : 'Start Capture'}</span>
+                        <span>{cameraError ? 'Retry Camera' : 'Start Camera'}</span>
                       </>
                     )}
                   </button>
@@ -742,10 +820,10 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
             </div>
           )}
 
-          {/* Active Overlay HUD */}
-          {cameraActive && (
+          {/* Active Overlay HUD (Section B, C, D) */}
+          {cameraActive && !showOnboarding && (
             <div className="camera-hud-overlay">
-              {/* Top Bar: Progress, Calibrate, Rotation Step, Sound, Pause */}
+              {/* Top Bar: Progress, Calibrate 0°, Voice, Audio, Pause, Camera switch */}
               <div className="hud-top-bar">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                   <div className="hud-badge active-target-badge">
@@ -756,18 +834,21 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                     <span>{activeTarget.label}</span>
                   </div>
 
-                  {/* Start Capture / Re-center Calibration Button */}
+                  {/* Reset / Set Start 0° Button */}
                   <button
+                    type="button"
                     className="hud-badge hud-action-pill"
-                    onClick={handleStartCaptureOrRecenter}
-                    title="Calibrate 0°: Sets current camera facing direction as starting baseline orientation"
+                    onClick={handleRecenter}
+                    title="Calibrate Forward: Sets current phone heading as starting orientation"
                   >
                     <RotateCcw size={12} color="#00d4ff" />
                     <span>Set Start 0°</span>
                   </button>
 
-                  {sensorPermissionNeeded && (
+                  {/* iOS sensor permission pill if needed */}
+                  {sensorStatus === 'permission_needed' && (
                     <button
+                      type="button"
                       className="hud-badge hud-action-pill"
                       style={{ background: 'rgba(0, 212, 255, 0.25)', border: '1px solid #00d4ff' }}
                       onClick={() => void requestOrientationPermission()}
@@ -779,13 +860,13 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {/* Rotation Step Angle Selector (30°, 36°, 45°) */}
+                  {/* Step Angle Selector (30°, 36°, 45°) */}
                   {captureMode === 'horizontal_360' && (
                     <select
                       className="hud-badge"
                       value={stepAngle}
                       onChange={(e) => handleStepAngleChange(parseInt(e.target.value) as RotationStepAngle)}
-                      title="Configurable capture positions and overlap"
+                      title="Select rotation step between shots"
                       style={{
                         cursor: 'pointer',
                         background: 'rgba(7, 11, 20, 0.85)',
@@ -793,37 +874,56 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                         border: '1px solid rgba(255,255,255,0.2)',
                       }}
                     >
-                      <option value={30}>Every 30° (12 shots • 45% overlap)</option>
-                      <option value={36}>Every 36° (10 shots • 35% overlap)</option>
-                      <option value={45}>Every 45° (8 shots • 30% overlap)</option>
+                      <option value={30}>Every 30° (12 shots)</option>
+                      <option value={36}>Every 36° (10 shots)</option>
+                      <option value={45}>Every 45° (8 shots)</option>
                     </select>
                   )}
 
-                  {/* Sound Toggle */}
+                  {/* Audio Chimes Toggle */}
                   <button
+                    type="button"
                     className="hud-icon-btn"
                     onClick={() => {
                       const next = !soundEnabled;
                       setSoundEnabled(next);
                       feedback.setSoundEnabled(next);
                     }}
-                    title={soundEnabled ? 'Mute audio cues' : 'Enable audio cues'}
+                    title={soundEnabled ? 'Mute audio beeps and chimes' : 'Enable audio beeps and chimes'}
+                    aria-label="Toggle audio tones"
                   >
-                    {soundEnabled ? <Volume2 size={16} color="#00d4ff" /> : <VolumeX size={16} color="#94a3b8" />}
+                    {soundEnabled ? <Volume2 size={16} color="#10b981" /> : <VolumeX size={16} color="#94a3b8" />}
+                  </button>
+
+                  {/* Spoken Voice Toggle (Section D) */}
+                  <button
+                    type="button"
+                    className="hud-icon-btn"
+                    onClick={() => {
+                      const next = !voiceEnabled;
+                      setVoiceEnabled(next);
+                      feedback.setVoiceEnabled(next);
+                    }}
+                    title={voiceEnabled ? 'Mute spoken voice assistant' : 'Enable spoken voice assistant'}
+                    aria-label="Toggle voice guidance"
+                  >
+                    {voiceEnabled ? <Volume2 size={16} color="#00d4ff" /> : <VolumeX size={16} color="#94a3b8" />}
                   </button>
 
                   {/* Pause / Resume Auto-Capture */}
                   {hasOrientationSensor && (
                     <button
+                      type="button"
                       className={`hud-icon-btn ${isAutoCapturePaused ? 'paused' : ''}`}
                       onClick={() => setIsAutoCapturePaused(!isAutoCapturePaused)}
-                      title={isAutoCapturePaused ? 'Resume Auto-Capture' : 'Pause Auto-Capture'}
+                      title={isAutoCapturePaused ? 'Resume Auto-Capture' : 'Pause Auto-Capture (Manual Shutter)'}
+                      aria-label="Toggle auto capture pause"
                     >
                       {isAutoCapturePaused ? <Play size={16} color="#f59e0b" /> : <Pause size={16} color="#00d4ff" />}
                     </button>
                   )}
 
-                  {/* Camera switcher if multiple cameras are detected */}
+                  {/* Camera switcher if multiple cameras detected */}
                   {availableCameras.length > 1 && (
                     <select
                       className="hud-badge"
@@ -851,19 +951,19 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                   {/* Progress Pill */}
                   <div className="hud-badge progress-badge">
                     <span>
-                      {capturedCount} / {targets.length} ({progressPct}%)
+                      {capturedCount} / {targets.length}
                     </span>
                   </div>
                 </div>
               </div>
 
-              {/* 1. Center Reticle & Level Horizon (Fixed at Viewfinder Center) */}
+              {/* 1. Large Central Target Reticle (Fixed at Viewfinder Center) */}
               <div className="hud-center-reticle-container">
                 <div
                   className={`hud-reticle-ring ${
-                    alignmentStatus === 'aligned_green'
+                    guidance.visualState === 'aligned_green'
                       ? 'aligned'
-                      : alignmentStatus === 'holding'
+                      : guidance.visualState === 'approaching'
                       ? 'holding'
                       : ''
                   }`}
@@ -871,9 +971,42 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                   <div className="hud-reticle-crosshair-h" />
                   <div className="hud-reticle-crosshair-v" />
                   <div className="hud-reticle-dot" />
+
+                  {/* Visible 3-Second Countdown Progress Ring & Counter (Section D) */}
+                  {isCountdownActive && (
+                    <svg className="target-countdown-svg" viewBox="0 0 100 100">
+                      {/* Background track */}
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="44"
+                        fill="none"
+                        stroke="rgba(255, 255, 255, 0.15)"
+                        strokeWidth="5"
+                      />
+                      {/* Active green countdown stroke */}
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="44"
+                        fill="none"
+                        stroke="#10b981"
+                        strokeWidth="5"
+                        strokeDasharray={276.4}
+                        strokeDashoffset={276.4 * (1 - countdownProgress)}
+                        strokeLinecap="round"
+                        transform="rotate(-90 50 50)"
+                      />
+                    </svg>
+                  )}
+
+                  {/* Countdown Big Number Display (3... 2... 1...) */}
+                  {isCountdownActive && (
+                    <div className="countdown-number-badge">{countdownSeconds}</div>
+                  )}
                 </div>
 
-                {/* Level Horizon Bar (Roll indicator) */}
+                {/* Subtle Level Horizon Line */}
                 {hasOrientationSensor && (
                   <div className="hud-level-indicator" title="Hold phone level horizontally">
                     <div
@@ -884,183 +1017,130 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                 )}
               </div>
 
-              {/* 2. Floating Alignment Target: Rectangular Frame + Circular Center Target + Directional Marker */}
-              {projection.isInView ? (
-                <div
-                  className={`hud-alignment-target ${
-                    alignmentStatus === 'aligned_green'
-                      ? 'aligned-green'
-                      : alignmentStatus === 'holding'
-                      ? 'holding-steady'
-                      : ''
-                  }`}
-                  style={{
-                    left: `${projection.screenX}%`,
-                    top: `${projection.screenY}%`,
-                  }}
-                >
-                  {/* Transparent Rectangular Frame with Corner Brackets */}
-                  <div className="target-rectangular-frame">
-                    <div className="frame-corner top-left" />
-                    <div className="frame-corner top-right" />
-                    <div className="frame-corner bottom-left" />
-                    <div className="frame-corner bottom-right" />
-
-                    {/* Small Directional Marker Notch */}
-                    <div
-                      className="target-directional-marker"
-                      style={{
-                        transform: `rotate(${projection.edgeArrowAngle}deg)`,
-                      }}
-                    >
-                      <div className="marker-arrow-indicator" />
-                    </div>
-
-                    {/* Circular Center Target with Hold Progress Ring */}
-                    <div className="target-center-circle">
-                      {alignmentStatus === 'aligned_green' ? (
-                        <Check size={26} color="#ffffff" strokeWidth={3.5} />
-                      ) : (
-                        <div className="target-center-bullseye" />
-                      )}
-
-                      {/* 500-800ms Circular Stability Progress Ring */}
-                      {holdProgress > 0 && (
-                        <svg className="target-hold-svg" viewBox="0 0 68 68">
-                          <circle
-                            cx="34"
-                            cy="34"
-                            r="30"
-                            fill="none"
-                            stroke={alignmentStatus === 'aligned_green' ? '#10b981' : '#00d4ff'}
-                            strokeWidth="4"
-                            strokeDasharray={188.5}
-                            strokeDashoffset={188.5 - (188.5 * holdProgress) / 100}
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      )}
-                    </div>
-
-                    {/* Dynamic Status / Instruction Text */}
-                    <div className="target-floating-badge">
-                      {alignmentStatus === 'aligned_green'
-                        ? 'HOLD STEADY'
-                        : alignmentStatus === 'holding'
-                        ? 'HOLD STEADY...'
-                        : `${projection.directionHint} (${projection.degreesToTarget}°)`}
-                    </div>
-                  </div>
+              {/* 2. Floating Next-Position Target (The amber/orange circle from Image 1 & 3) */}
+              <div
+                className={`hud-floating-target-dot ${
+                  guidance.visualState === 'aligned_green'
+                    ? 'aligned-green'
+                    : guidance.visualState === 'approaching'
+                    ? 'approaching'
+                    : 'far'
+                }`}
+                style={{
+                  left: `${guidance.screenX}%`,
+                  top: `${guidance.screenY}%`,
+                }}
+              >
+                <div className="floating-target-disc">
+                  {guidance.visualState === 'aligned_green' ? (
+                    <Check size={26} color="#ffffff" strokeWidth={3.5} />
+                  ) : (
+                    <div className="floating-target-inner-core" />
+                  )}
                 </div>
-              ) : (
-                /* 3. Off-Screen Directional Edge Arrow with remaining degrees */
+              </div>
+
+              {/* 3. Large Directional Guidance Arrow (Image 1, Image 2, Image 4) */}
+              {guidance.primaryDirection !== 'aligned' && !isCountdownActive && (
                 <div
-                  className="hud-edge-arrow-container"
+                  className="hud-directional-arrow-banner"
                   style={{
-                    left: `${projection.screenX}%`,
-                    top: `${projection.screenY}%`,
+                    transform: `rotate(${guidance.arrowAngleDeg}deg)`,
                   }}
+                  aria-hidden="true"
                 >
-                  <div
-                    className="edge-arrow-disc"
-                    style={{
-                      transform: `rotate(${projection.edgeArrowAngle}deg)`,
-                    }}
-                  >
-                    <ArrowRight size={22} color="#00d4ff" />
-                  </div>
-                  <div className="edge-distance-pill">
-                    {projection.directionHint} ({projection.degreesToTarget}°)
+                  <div className="directional-arrow-wave">
+                    <ArrowRight size={38} color="#00d4ff" strokeWidth={3} />
                   </div>
                 </div>
               )}
 
-              {/* Actionable Guidance Banner (Concise instructions) */}
+              {/* 4. Primary Single Instruction Banner (Section B & E) */}
               <div className="hud-instruction-card">
-                <div className="hud-primary-instruction">
-                  {alignmentStatus === 'aligned_green'
-                    ? 'HOLD STEADY'
-                    : alignmentStatus === 'holding'
-                    ? 'HOLD STEADY...'
-                    : projection.guidanceText}
-                </div>
-                <div className="hud-secondary-hint">
-                  {hasOrientationSensor
-                    ? `Pitch: ${Math.round(orientation.pitch)}° • Yaw: ${Math.round(orientation.yaw)}° • Roll: ${Math.round(
-                        orientation.roll
-                      )}°`
-                    : activeTarget.instruction}
-                </div>
+                <div className="hud-primary-instruction">{guidance.instruction}</div>
+                {guidance.subInstruction && (
+                  <div className="hud-secondary-hint">{guidance.subInstruction}</div>
+                )}
               </div>
 
-              {/* Bottom Control Bar: Undo, Nav, Shutter, Nav */}
-              <div className="hud-bottom-controls">
-                {/* Retake / Undo Button */}
-                <button
-                  className="hud-nav-btn"
-                  onClick={handleUndoLastCapture}
-                  disabled={capturedHistory.length === 0}
-                  style={{ opacity: capturedHistory.length === 0 ? 0.35 : 1 }}
-                  title="Retake last frame / Undo capture"
-                  aria-label="Undo last photo"
-                >
-                  <RotateCcw size={20} />
-                </button>
+              {/* 5. Bottom Controls & Progress Summary (Image 3 & 4) */}
+              <div className="hud-bottom-controls-container">
+                <div className="hud-progress-summary-text">{guidance.progressSummary}</div>
 
-                {/* Previous Target */}
-                <button
-                  className="hud-nav-btn"
-                  onClick={() => setActiveTargetIndex((prev) => (prev > 0 ? prev - 1 : targets.length - 1))}
-                  title="Previous angle"
-                  aria-label="Previous angle"
-                >
-                  <ChevronLeft size={22} />
-                </button>
-
-                {/* Shutter Button (Auto / Manual Tap) */}
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                <div className="hud-bottom-controls">
+                  {/* Retake / Undo Button */}
                   <button
-                    className={`hud-shutter-btn ${activeTarget.isCaptured ? 'captured' : ''} ${
-                      isCapturing ? 'capturing' : ''
-                    }`}
-                    onClick={captureCurrentTarget}
-                    disabled={isCapturing}
-                    aria-label={activeTarget.isCaptured ? 'Retake photo' : 'Capture photo'}
-                    title={activeTarget.isCaptured ? 'Angle captured - tap to retake' : 'Capture photo manually'}
+                    type="button"
+                    className="hud-nav-btn"
+                    onClick={handleUndoLastCapture}
+                    disabled={capturedHistory.length === 0}
+                    style={{ opacity: capturedHistory.length === 0 ? 0.35 : 1 }}
+                    title="Retake last photo / Undo capture"
+                    aria-label="Undo last photo"
                   >
-                    <div className="hud-shutter-inner">
-                      {activeTarget.isCaptured ? (
-                        <Check size={28} color="#10b981" />
-                      ) : (
-                        <div className="hud-shutter-circle" />
-                      )}
-                    </div>
+                    <RotateCcw size={20} />
                   </button>
-                  <span style={{ fontSize: '0.68rem', color: '#cbd5e1', textShadow: '0 1px 3px rgba(0,0,0,0.8)' }}>
-                    {activeTarget.isCaptured
-                      ? 'Captured'
-                      : isAutoCapturePaused
-                      ? 'Manual Shutter'
-                      : 'Auto / Tap'}
-                  </span>
-                </div>
 
-                {/* Next Target */}
-                <button
-                  className="hud-nav-btn"
-                  onClick={() => {
-                    const nextUncaptured = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
-                    if (nextUncaptured !== -1) {
-                      setActiveTargetIndex(nextUncaptured);
-                    } else {
-                      setActiveTargetIndex((prev) => (prev < targets.length - 1 ? prev + 1 : 0));
-                    }
-                  }}
-                  title="Skip to next target"
-                  aria-label="Next angle"
-                >
-                  <ChevronRight size={22} />
-                </button>
+                  {/* Previous Target */}
+                  <button
+                    type="button"
+                    className="hud-nav-btn"
+                    onClick={() => setActiveTargetIndex((prev) => (prev > 0 ? prev - 1 : targets.length - 1))}
+                    title="Previous angle"
+                    aria-label="Previous angle"
+                  >
+                    <ChevronLeft size={22} />
+                  </button>
+
+                  {/* Shutter Button (Auto / Manual Tap) */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                    <button
+                      type="button"
+                      className={`hud-shutter-btn ${activeTarget.isCaptured ? 'captured' : ''} ${
+                        isCapturing ? 'capturing' : ''
+                      }`}
+                      onClick={captureCurrentTarget}
+                      disabled={isCapturing}
+                      aria-label={activeTarget.isCaptured ? 'Retake photo' : 'Capture photo'}
+                      title={activeTarget.isCaptured ? 'Angle captured - tap to retake' : 'Capture photo manually'}
+                    >
+                      <div className="hud-shutter-inner">
+                        {activeTarget.isCaptured ? (
+                          <Check size={28} color="#10b981" />
+                        ) : (
+                          <div className="hud-shutter-circle" />
+                        )}
+                      </div>
+                    </button>
+                    <span style={{ fontSize: '0.68rem', color: '#cbd5e1', textShadow: '0 1px 3px rgba(0,0,0,0.8)' }}>
+                      {activeTarget.isCaptured
+                        ? 'Captured'
+                        : isAutoCapturePaused
+                        ? 'Manual Shutter'
+                        : isCountdownActive
+                        ? 'Hold Still…'
+                        : 'Auto / Tap'}
+                    </span>
+                  </div>
+
+                  {/* Next Target */}
+                  <button
+                    type="button"
+                    className="hud-nav-btn"
+                    onClick={() => {
+                      const nextUncaptured = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
+                      if (nextUncaptured !== -1) {
+                        setActiveTargetIndex(nextUncaptured);
+                      } else {
+                        setActiveTargetIndex((prev) => (prev < targets.length - 1 ? prev + 1 : 0));
+                      }
+                    }}
+                    title="Next angle"
+                    aria-label="Next angle"
+                  >
+                    <ChevronRight size={22} />
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -1075,7 +1155,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                 <span key={i}>{w}</span>
               ))}
               <span style={{ fontSize: '0.74rem', opacity: 0.85 }}>
-                Tip: You can tap Retake Last Frame to capture this position again with better alignment.
+                Tip: You can tap the Retake button to capture this position again with better alignment.
               </span>
             </div>
           </div>
@@ -1105,6 +1185,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
               const isActive = idx === activeTargetIndex;
               return (
                 <button
+                  type="button"
                   key={t.id}
                   className={`timeline-dot-btn ${t.isCaptured ? 'captured' : ''} ${isActive ? 'active' : ''}`}
                   onClick={() => (t.isCaptured && isActive ? retakeTarget(idx) : setActiveTargetIndex(idx))}
@@ -1140,6 +1221,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
         >
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
             <button
+              type="button"
               className="btn btn-secondary"
               onClick={() => {
                 stopCamera();
@@ -1150,6 +1232,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
             </button>
 
             <button
+              type="button"
               className="btn btn-outline"
               onClick={() => nativeInputRef.current?.click()}
               title="Capture photo using your device's native camera application"
@@ -1160,6 +1243,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
 
             {capturedCount > 0 && (
               <button
+                type="button"
                 className="btn btn-outline"
                 style={{ color: '#f43f5e', borderColor: 'rgba(244, 63, 94, 0.3)' }}
                 onClick={handleRestartCapture}
@@ -1171,6 +1255,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
           </div>
 
           <button
+            type="button"
             className="btn btn-primary"
             onClick={handleFinish}
             disabled={capturedCount === 0}
@@ -1184,6 +1269,13 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
             </span>
           </button>
         </div>
+
+        {/* Plain Language Step Help Modal */}
+        <CameraHelpModal
+          isOpen={showHelpModal}
+          onClose={() => setShowHelpModal(false)}
+          currentStepLabel={`Position ${activeTargetIndex + 1}: ${guidance.instruction}`}
+        />
       </div>
     </div>
   );
