@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Play, AlertCircle, RefreshCw } from 'lucide-react';
 import { Header } from './components/Header';
 import { PhotoStudio } from './components/PhotoStudio';
@@ -47,7 +47,7 @@ export const App: React.FC = () => {
   const [isCheckingQuality, setIsCheckingQuality] = useState(false);
   const [cameraModalOpen, setCameraModalOpen] = useState(false);
 
-  // Video Workflow State (Preserved secondary tab)
+  // Video Workflow State
   const [selectedVideoFile, setSelectedVideoFile] = useState<File | null>(null);
 
   // Common Processing & Viewer State
@@ -63,7 +63,7 @@ export const App: React.FC = () => {
   const [ffmpegModalOpen, setFFmpegModalOpen] = useState(false);
 
   // Fetch backend health on mount
-  const loadHealth = async () => {
+  const loadHealth = useCallback(async () => {
     try {
       setHealthLoading(true);
       const data = await fetchHealth();
@@ -81,10 +81,35 @@ export const App: React.FC = () => {
     } finally {
       setHealthLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    void loadHealth();
+    let ignore = false;
+    fetchHealth()
+      .then((data) => {
+        if (!ignore) {
+          setHealth(data);
+          setHealthLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!ignore) {
+          console.error('Health check error:', err);
+          setHealth({
+            status: 'error',
+            app_name: 'Laveon Studio 360',
+            version: '1.0.0',
+            ffmpeg_available: false,
+            opencv_version: 'Unknown',
+            message: 'Could not connect to FastAPI backend on http://127.0.0.1:8000. Ensure the backend server is running.',
+          });
+          setHealthLoading(false);
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
   }, []);
 
   // Pre-check photos for blur and overlap
@@ -155,7 +180,7 @@ export const App: React.FC = () => {
     setCurrentStepIndex(0);
     setResult(null);
 
-    // Simulated progress stepper
+    // Realistic progress stepper timer
     const stepInterval = setInterval(() => {
       setCurrentStepIndex((prev) => (prev < 4 ? prev + 1 : prev));
     }, 1800);
@@ -197,7 +222,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-container">
-      {/* Top Header */}
+      {/* Top Responsive Header */}
       <Header
         activeTab={activeTab}
         onTabChange={(tab) => {
@@ -215,19 +240,19 @@ export const App: React.FC = () => {
 
       {/* Global Notice / Error Banner */}
       {globalError && (
-        <div className="coverage-notice-card alert">
-          <AlertCircle size={20} color="#f43f5e" style={{ flexShrink: 0 }} />
+        <div className="coverage-notice-card alert" role="alert">
+          <AlertCircle size={20} color="#f43f5e" style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
           <div>
-            <div className="notice-title" style={{ color: '#f43f5e' }}>Notice</div>
+            <div className="notice-title" style={{ color: '#f43f5e' }}>Stitching Notice</div>
             <div className="notice-body">{globalError}</div>
           </div>
         </div>
       )}
 
-      {/* Studio Workspace Grid */}
-      <div className="studio-grid">
+      {/* Main Studio Workspace Grid */}
+      <main className="studio-grid" id="main-content">
         {/* Left Column: Media Inputs & Parameters */}
-        <div className="controls-column">
+        <section className="controls-column" aria-label="Controls and Inputs">
           {/* Workflow 1: Photo Studio (Primary) */}
           {activeTab === 'photo' && (
             <PhotoStudio
@@ -248,7 +273,7 @@ export const App: React.FC = () => {
             />
           )}
 
-          {/* Workflow 2: Video Sweep (Preserved secondary tab) */}
+          {/* Workflow 2: Video Sweep */}
           {activeTab === 'video' && (
             <VideoUpload
               selectedFile={selectedVideoFile}
@@ -275,22 +300,24 @@ export const App: React.FC = () => {
             mode={activeTab}
           />
 
-          {/* Main Action Trigger */}
-          <div className="glass-panel" style={{ padding: '20px 24px' }}>
+          {/* Primary Action Button Card */}
+          <div className="glass-panel" style={{ padding: '18px 22px' }}>
             <button
+              type="button"
               className="btn btn-primary"
-              style={{ width: '100%', padding: '14px', fontSize: '1.02rem' }}
+              style={{ width: '100%', padding: '14px', fontSize: '1rem', minHeight: '48px' }}
               onClick={handleStartStitching}
               disabled={!canStitch || isProcessing}
+              aria-busy={isProcessing}
             >
               {isProcessing ? (
                 <>
-                  <RefreshCw size={18} className="animate-spin" />
-                  <span>Stitching in Progress...</span>
+                  <RefreshCw size={17} className="animate-spin" aria-hidden="true" />
+                  <span>Stitching in Progress…</span>
                 </>
               ) : (
                 <>
-                  <Play size={18} fill="currentColor" />
+                  <Play size={17} fill="currentColor" aria-hidden="true" />
                   <span>
                     {activeTab === 'photo'
                       ? `Stitch ${photos.length} Photos into 360° Panorama`
@@ -301,17 +328,17 @@ export const App: React.FC = () => {
             </button>
 
             {!canStitch && (
-              <p style={{ textAlign: 'center', fontSize: '0.78rem', color: '#64748b', marginTop: '10px' }}>
+              <p style={{ textAlign: 'center', fontSize: '0.76rem', color: '#64748b', marginTop: '8px' }}>
                 {activeTab === 'photo'
-                  ? 'Please add or capture at least 2 photos to begin.'
-                  : 'Please select a rotational video to begin.'}
+                  ? 'Add at least 2 photos on the left to begin stitching.'
+                  : 'Select a rotational video sweep on the left to begin stitching.'}
               </p>
             )}
           </div>
-        </div>
+        </section>
 
-        {/* Right Column: Progress & Interactive Panorama Viewer */}
-        <div className="canvas-column">
+        {/* Right Column: Progress Tracker & Interactive Canvas */}
+        <section className="canvas-column" aria-label="Panorama Output Canvas">
           <ProgressTracker
             isProcessing={isProcessing}
             currentStepIndex={currentStepIndex}
@@ -323,8 +350,8 @@ export const App: React.FC = () => {
             onRetry={handleRetry}
             isProcessing={isProcessing}
           />
-        </div>
-      </div>
+        </section>
+      </main>
 
       {/* Guided In-Browser Camera Capture Modal */}
       <CameraGuideModal
@@ -343,7 +370,7 @@ export const App: React.FC = () => {
         onClose={() => setGuideOpen(false)}
       />
 
-      {/* FFmpeg Setup Modal (for video mode if opened) */}
+      {/* FFmpeg Setup Modal */}
       <FFmpegGuideModal
         isOpen={ffmpegModalOpen}
         onClose={() => setFFmpegModalOpen(false)}

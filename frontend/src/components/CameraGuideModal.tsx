@@ -1,16 +1,37 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Camera,
   X,
   Check,
   AlertTriangle,
-  Compass,
   ChevronRight,
   ChevronLeft,
   RefreshCw,
-  Smartphone
+  Smartphone,
+  Compass,
+  Volume2,
+  VolumeX,
+  Pause,
+  Play,
+  RotateCcw,
+  CheckCircle2,
+  Circle,
+  Layers,
+  ArrowRight
 } from 'lucide-react';
-import type { CaptureTarget } from '../types';
+import {
+  globalOrientationTracker,
+  type OrientationData
+} from '../services/orientationTracker';
+import {
+  TargetPlanner,
+  type SphericalTarget,
+  type CaptureMode
+} from '../services/targetPlanner';
+import {
+  AlignmentValidator
+} from '../services/alignmentValidator';
+import { feedback } from '../utils/feedback';
 
 interface CameraGuideModalProps {
   isOpen: boolean;
@@ -18,65 +39,124 @@ interface CameraGuideModalProps {
   onAddCapturedPhotos: (photos: File[]) => void;
 }
 
-const INITIAL_TARGETS: CaptureTarget[] = [
-  // 1. Zenith (Sky / Ceiling)
-  { id: 'zenith', tier: 'zenith', targetYaw: 0, targetPitch: 75, label: 'Zenith', description: 'Tilt straight up towards the sky/ceiling (+75°)', isCaptured: false },
-  // 2. Upper Sky Ring (+35° elevation)
-  { id: 'upper_n', tier: 'upper', targetYaw: 0, targetPitch: 35, label: 'Sky North', description: 'Tilt 35° up facing North', isCaptured: false },
-  { id: 'upper_e', tier: 'upper', targetYaw: 90, targetPitch: 35, label: 'Sky East', description: 'Tilt 35° up facing East', isCaptured: false },
-  { id: 'upper_s', tier: 'upper', targetYaw: 180, targetPitch: 35, label: 'Sky South', description: 'Tilt 35° up facing South', isCaptured: false },
-  { id: 'upper_w', tier: 'upper', targetYaw: 270, targetPitch: 35, label: 'Sky West', description: 'Tilt 35° up facing West', isCaptured: false },
-  // 3. Horizon Ring (0° elevation)
-  { id: 'horizon_n', tier: 'horizon', targetYaw: 0, targetPitch: 0, label: 'North (0°)', description: 'Level view North (0°)', isCaptured: false },
-  { id: 'horizon_ne', tier: 'horizon', targetYaw: 45, targetPitch: 0, label: 'North-East (45°)', description: 'Level view North-East (45°)', isCaptured: false },
-  { id: 'horizon_e', tier: 'horizon', targetYaw: 90, targetPitch: 0, label: 'East (90°)', description: 'Level view East (90°)', isCaptured: false },
-  { id: 'horizon_se', tier: 'horizon', targetYaw: 135, targetPitch: 0, label: 'South-East (135°)', description: 'Level view South-East (135°)', isCaptured: false },
-  { id: 'horizon_s', tier: 'horizon', targetYaw: 180, targetPitch: 0, label: 'South (180°)', description: 'Level view South (180°)', isCaptured: false },
-  { id: 'horizon_sw', tier: 'horizon', targetYaw: 225, targetPitch: 0, label: 'South-West (225°)', description: 'Level view South-West (225°)', isCaptured: false },
-  { id: 'horizon_w', tier: 'horizon', targetYaw: 270, targetPitch: 0, label: 'West (270°)', description: 'Level view West (270°)', isCaptured: false },
-  { id: 'horizon_nw', tier: 'horizon', targetYaw: 315, targetPitch: 0, label: 'North-West (315°)', description: 'Level view North-West (315°)', isCaptured: false },
-  // 4. Lower Ground Ring (-35° elevation)
-  { id: 'lower_n', tier: 'lower', targetYaw: 0, targetPitch: -35, label: 'Ground North', description: 'Tilt 35° down facing North', isCaptured: false },
-  { id: 'lower_e', tier: 'lower', targetYaw: 90, targetPitch: -35, label: 'Ground East', description: 'Tilt 35° down facing East', isCaptured: false },
-  { id: 'lower_s', tier: 'lower', targetYaw: 180, targetPitch: -35, label: 'Ground South', description: 'Tilt 35° down facing South', isCaptured: false },
-  { id: 'lower_w', tier: 'lower', targetYaw: 270, targetPitch: -35, label: 'Ground West', description: 'Tilt 35° down facing West', isCaptured: false },
-  // 5. Nadir (Ground / Floor)
-  { id: 'nadir', tier: 'nadir', targetYaw: 0, targetPitch: -75, label: 'Nadir', description: 'Tilt straight down towards the ground/floor (-75°)', isCaptured: false },
-];
-
 export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
   isOpen,
   onClose,
   onAddCapturedPhotos,
 }) => {
-  const [targets, setTargets] = useState<CaptureTarget[]>(INITIAL_TARGETS);
-  const [activeTargetIndex, setActiveTargetIndex] = useState(5); // Start at Horizon North
+  // Capture configuration state
+  const [captureMode, setCaptureMode] = useState<CaptureMode>('horizontal_360');
+  const [overlapPct, setOverlapPct] = useState<number>(0.33); // 33% overlap default
+
+  // Planner instance
+  const planner = useMemo(() => {
+    return new TargetPlanner({
+      mode: captureMode,
+      overlapPercentage: overlapPct,
+      hfov: 60,
+      vfov: 75,
+    });
+  }, [captureMode, overlapPct]);
+
+  // Target collection
+  const [targets, setTargets] = useState<SphericalTarget[]>(() => planner.generateTargets());
+  const [activeTargetIndex, setActiveTargetIndex] = useState(0);
+  const [capturedHistory, setCapturedHistory] = useState<number[]>([]);
+
+  // Regenerate targets whenever mode or overlap changes
+  const handleModeChange = (newMode: CaptureMode) => {
+    setCaptureMode(newMode);
+    const newPlanner = new TargetPlanner({
+      mode: newMode,
+      overlapPercentage: overlapPct,
+      hfov: 60,
+      vfov: 75,
+    });
+    setTargets(newPlanner.generateTargets());
+    setActiveTargetIndex(0);
+    setCapturedHistory([]);
+  };
+
+  const handleOverlapChange = (newOverlap: number) => {
+    setOverlapPct(newOverlap);
+    const newPlanner = new TargetPlanner({
+      mode: captureMode,
+      overlapPercentage: newOverlap,
+      hfov: 60,
+      vfov: 75,
+    });
+    setTargets(newPlanner.generateTargets());
+    setActiveTargetIndex(0);
+    setCapturedHistory([]);
+  };
+
+  // Hardware Camera State
   const [cameraActive, setCameraActive] = useState(false);
   const [isStartingCamera, setIsStartingCamera] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isFlashing, setIsFlashing] = useState(false);
   const [lastBlurWarning, setLastBlurWarning] = useState<string | null>(null);
 
-  // Device orientation (degrees)
-  const [deviceYaw, setDeviceYaw] = useState(0);
-  const [devicePitch, setDevicePitch] = useState(0);
+  // Sensor & Orientation State
+  const [orientation, setOrientation] = useState<OrientationData>({
+    yaw: 0,
+    pitch: 0,
+    roll: 0,
+    rawAlpha: 0,
+    rawBeta: 0,
+    rawGamma: 0,
+    isCalibrated: false,
+    screenAngle: 0,
+  });
   const [hasOrientationSensor, setHasOrientationSensor] = useState(false);
+  const [sensorPermissionNeeded, setSensorPermissionNeeded] = useState<boolean>(() => {
+    return typeof (window as any)?.DeviceOrientationEvent?.requestPermission === 'function';
+  });
 
+  // Controls State
+  const [isAutoCapturePaused, setIsAutoCapturePaused] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+
+  // Alignment Validator
+  const validator = useMemo(() => new AlignmentValidator({
+    toleranceDegrees: 3.5, // 2-4 degrees
+    stabilityHoldMs: 300,  // 300ms hold
+    rollToleranceDegrees: 15,
+  }), []);
+
+  const [holdProgress, setHoldProgress] = useState(0);
+  const [alignmentStatus, setAlignmentStatus] = useState<'unaligned' | 'holding' | 'aligned_green'>('unaligned');
+
+  // DOM Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const nativeInputRef = useRef<HTMLInputElement | null>(null);
+  const captureLockRef = useRef(false);
 
   const activeTarget = targets[activeTargetIndex] || targets[0];
   const capturedCount = targets.filter((t) => t.isCaptured).length;
-  const progressPct = Math.round((capturedCount / targets.length) * 100);
+  const progressPct = targets.length > 0 ? Math.round((capturedCount / targets.length) * 100) : 0;
 
-  // Check if camera aligns with current target
-  const yawDiff = Math.abs(((deviceYaw - activeTarget.targetYaw + 540) % 360) - 180);
-  const pitchDiff = Math.abs(devicePitch - activeTarget.targetPitch);
-  const isAligned = hasOrientationSensor ? yawDiff < 18 && pitchDiff < 18 : true;
+  // Project active target onto camera screen space
+  const projection = useMemo(() => {
+    if (!activeTarget) {
+      return {
+        screenX: 50,
+        screenY: 50,
+        isInView: true,
+        deltaYaw: 0,
+        deltaPitch: 0,
+        angularDistance: 0,
+        edgeArrowAngle: 0,
+        directionHint: 'Align target with reticle',
+      };
+    }
+    return planner.projectTarget(activeTarget, orientation.yaw, orientation.pitch);
+  }, [activeTarget, orientation.yaw, orientation.pitch, planner]);
 
   // Clean stop camera stream
   const stopCamera = useCallback(() => {
@@ -87,7 +167,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     setCameraActive(false);
   }, []);
 
-  // Multi-tier, fault-tolerant camera start
+  // Multi-tier, fault-tolerant camera startup
   const startCamera = useCallback(async (overrideDeviceId?: string) => {
     setCameraError(null);
     setIsStartingCamera(true);
@@ -95,11 +175,10 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error(
-          'In-browser camera access requires HTTPS or localhost. If you are accessing from another device on your network, use the "Snap with Device Camera App" button below or access via localhost.'
+          'In-browser camera access requires HTTPS or localhost. If accessing over a local Wi-Fi IP, use localhost port-forwarding or use the "Snap with Device Camera" option.'
         );
       }
 
-      // Stop any existing active stream first
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
@@ -109,15 +188,13 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
       let stream: MediaStream | null = null;
 
       if (targetDeviceId) {
-        // Specific device selected by user
         stream = await navigator.mediaDevices.getUserMedia({
           video: { deviceId: { exact: targetDeviceId } },
           audio: false,
         });
       } else {
-        // Progressive fallback strategy:
-        // Tier 1: High-res environment/rear camera (ideal for phones)
         try {
+          // Tier 1: Rear environment camera with HD resolution
           stream = await navigator.mediaDevices.getUserMedia({
             video: {
               facingMode: { ideal: 'environment' },
@@ -126,17 +203,15 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
             },
             audio: false,
           });
-        } catch (tier1Err) {
-          console.warn('Tier 1 camera constraints failed, attempting Tier 2:', tier1Err);
-          // Tier 2: Basic environment facing camera
+        } catch {
           try {
+            // Tier 2: Basic environment camera
             stream = await navigator.mediaDevices.getUserMedia({
               video: { facingMode: { ideal: 'environment' } },
               audio: false,
             });
-          } catch (tier2Err) {
-            console.warn('Tier 2 camera constraints failed, attempting universal fallback:', tier2Err);
-            // Tier 3: Universal fallback (works with any webcam, laptop camera, virtual camera)
+          } catch {
+            // Tier 3: Universal fallback (webcam, laptop camera)
             stream = await navigator.mediaDevices.getUserMedia({
               video: true,
               audio: false,
@@ -148,33 +223,31 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
       streamRef.current = stream;
       setCameraActive(true);
 
-      // Attach stream to video element
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play().catch((playErr) => {
-            console.warn('Video play delayed or prevented by browser:', playErr);
+            console.warn('Video play prevented by browser:', playErr);
           });
         };
       }
 
-      // Enumerate available video devices
       try {
         const allDevices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = allDevices.filter((d) => d.kind === 'videoinput');
         setAvailableCameras(videoDevices);
       } catch (enumErr) {
-        console.warn('Camera enumeration warning:', enumErr);
+        console.warn('Camera enumeration error:', enumErr);
       }
     } catch (err: any) {
       console.error('Camera access error:', err);
       let errorMsg = 'Could not access camera.';
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        errorMsg = 'Camera permission was denied. Please click the camera or lock icon in your browser address bar to allow camera access, then click "Retry Camera".';
+        errorMsg = 'Camera permission was denied. Please allow camera access in your browser address bar.';
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        errorMsg = 'No camera hardware detected on this device. You can connect a webcam or use the "Snap with Device Camera App" button.';
+        errorMsg = 'No camera hardware detected. Connect a camera or use "Snap with Device Camera".';
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        errorMsg = 'Camera is already in use by another application (e.g. Teams, Zoom, Skype, or Windows Camera app). Please close other camera apps and click "Retry Camera".';
+        errorMsg = 'Camera is already in use by another app. Please close other camera apps and retry.';
       } else if (err.message) {
         errorMsg = err.message;
       }
@@ -185,42 +258,56 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
     }
   }, [selectedDeviceId]);
 
-  // Automatically start camera when modal opens
-  useEffect(() => {
-    if (isOpen) {
-      void startCamera();
-    } else {
-      stopCamera();
+  // Request iOS 13+ sensor permissions
+  const requestOrientationPermission = async () => {
+    const granted = await globalOrientationTracker.requestPermission();
+    if (granted) {
+      setSensorPermissionNeeded(false);
+      setHasOrientationSensor(true);
+      globalOrientationTracker.start();
     }
-  }, [isOpen, startCamera, stopCamera]);
-
-  // Switch camera handler
-  const handleSwitchCamera = (deviceId: string) => {
-    setSelectedDeviceId(deviceId);
-    void startCamera(deviceId);
   };
 
-  // Device orientation tracking for mobile compass/gyroscope
+  // Re-calibrate relative 0° heading to current phone direction
+  const handleRecenter = () => {
+    globalOrientationTracker.recenter(orientation.rawAlpha);
+    validator.resetHold();
+    feedback.playLockTick();
+  };
+
+  // Subscribe to orientation tracker
   useEffect(() => {
     if (!isOpen) return;
 
-    const handleOrientation = (e: DeviceOrientationEvent) => {
-      if (e.alpha !== null && e.beta !== null) {
-        setHasOrientationSensor(true);
-        const yaw = Math.round(e.alpha);
-        const pitch = Math.round(90 - (e.beta || 90));
-        setDeviceYaw(yaw);
-        setDevicePitch(pitch);
-      }
-    };
+    const unsubscribe = globalOrientationTracker.subscribe((data) => {
+      setHasOrientationSensor(true);
+      setOrientation(data);
+    });
 
-    window.addEventListener('deviceorientation', handleOrientation);
     return () => {
-      window.removeEventListener('deviceorientation', handleOrientation);
+      unsubscribe();
+      validator.resetHold();
     };
-  }, [isOpen]);
+  }, [isOpen, validator]);
 
-  // Compute local Laplacian variance blur score from canvas
+  // Lifecycle start/stop camera
+  useEffect(() => {
+    let active = true;
+    if (isOpen) {
+      queueMicrotask(() => {
+        if (active) void startCamera();
+      });
+    } else {
+      queueMicrotask(() => {
+        stopCamera();
+      });
+    }
+    return () => {
+      active = false;
+    };
+  }, [isOpen, startCamera, stopCamera]);
+
+  // Laplacian variance blur check on canvas
   const checkCanvasBlur = (ctx: CanvasRenderingContext2D, width: number, height: number): number => {
     try {
       const imgData = ctx.getImageData(0, 0, Math.min(width, 320), Math.min(height, 240));
@@ -247,54 +334,79 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
       const variance = laplacian.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / laplacian.length;
       return Math.round(variance);
     } catch {
-      return 30;
+      return 35;
     }
   };
 
-  // Capture photo from live video element
-  const captureCurrentTarget = () => {
-    if (!videoRef.current || !cameraActive || isCapturing) return;
+  // Perform capture of active target
+  const captureCurrentTarget = useCallback(() => {
+    if (!videoRef.current || !cameraActive || isCapturing || captureLockRef.current) return;
 
+    captureLockRef.current = true;
     setIsCapturing(true);
-    const video = videoRef.current;
+    setIsFlashing(true);
 
+    feedback.playCaptureChime();
+    feedback.triggerHapticCapture();
+    setTimeout(() => setIsFlashing(false), 240);
+
+    const video = videoRef.current;
     const canvas = canvasRef.current || document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
+    canvas.width = video.videoWidth || 1920;
+    canvas.height = video.videoHeight || 1080;
     const ctx = canvas.getContext('2d');
+
     if (!ctx) {
       setIsCapturing(false);
+      captureLockRef.current = false;
       return;
     }
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    // Calculate blur score
     const blurScore = checkCanvasBlur(ctx, canvas.width, canvas.height);
     if (blurScore < 15) {
-      setLastBlurWarning(`Shot '${activeTarget.label}' appears slightly blurry (sharpness: ${blurScore}). You can retake it anytime.`);
+      setLastBlurWarning(`Angle '${activeTarget.label}' may have motion blur (${blurScore}). You can undo or retake.`);
     }
 
     canvas.toBlob(
       (blob) => {
         if (!blob) {
           setIsCapturing(false);
+          captureLockRef.current = false;
           return;
         }
 
-        const filename = `capture_${activeTarget.id}_${activeTarget.tier}_${Date.now()}.jpg`;
+        // Standard filename required by backend parser:
+        // capture_{id}_{tier}_{timestamp}.jpg
+        const timestamp = Date.now();
+        const filename = `capture_${activeTarget.id}_${activeTarget.tier}_${timestamp}.jpg`;
         const file = new File([blob], filename, { type: 'image/jpeg' });
         const previewUrl = URL.createObjectURL(blob);
 
         setTargets((prev) =>
           prev.map((t, idx) =>
             idx === activeTargetIndex
-              ? { ...t, isCaptured: true, photoFile: file, previewUrl, blurScore }
+              ? {
+                  ...t,
+                  isCaptured: true,
+                  photoFile: file,
+                  previewUrl,
+                  blurScore,
+                  orientationMetadata: {
+                    capturedYaw: Math.round(orientation.yaw),
+                    capturedPitch: Math.round(orientation.pitch),
+                    capturedRoll: Math.round(orientation.roll),
+                    timestamp,
+                  },
+                }
               : t
           )
         );
 
-        // Advance to next uncaptured target automatically
+        setCapturedHistory((prev) => [...prev, activeTargetIndex]);
+        validator.onCaptureComplete();
+
+        // Advance automatically to the next uncaptured target
         const nextIndex = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
         if (nextIndex !== -1) {
           setActiveTargetIndex(nextIndex);
@@ -306,62 +418,149 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
         }
 
         setIsCapturing(false);
+        captureLockRef.current = false;
+        setHoldProgress(0);
+        setAlignmentStatus('unaligned');
       },
       'image/jpeg',
       0.95
     );
-  };
+  }, [activeTarget, activeTargetIndex, cameraActive, isCapturing, orientation.pitch, orientation.roll, orientation.yaw, targets, validator]);
 
-  // Native camera / file picker fallback
-  const handleNativeCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Main alignment & stability auto-capture loop
+  useEffect(() => {
+    if (
+      !hasOrientationSensor ||
+      isAutoCapturePaused ||
+      activeTarget.isCaptured ||
+      isCapturing ||
+      captureLockRef.current
+    ) {
+      validator.resetHold();
+      setHoldProgress(0);
+      setAlignmentStatus('unaligned');
+      return;
+    }
 
-    const previewUrl = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.min(img.width, 320);
-      canvas.height = Math.min(img.height, 240);
-      const ctx = canvas.getContext('2d');
-      let blurScore = 30;
-      if (ctx) {
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        blurScore = checkCanvasBlur(ctx, canvas.width, canvas.height);
-      }
+    const evaluation = validator.evaluate(
+      projection.angularDistance,
+      orientation.roll,
+      isCapturing,
+      isAutoCapturePaused,
+      hasOrientationSensor
+    );
 
-      setTargets((prev) =>
-        prev.map((t, idx) =>
-          idx === activeTargetIndex
-            ? { ...t, isCaptured: true, photoFile: file, previewUrl, blurScore }
-            : t
-        )
-      );
+    setAlignmentStatus(evaluation.status);
+    setHoldProgress(evaluation.holdProgressPct);
 
-      // Advance to next uncaptured
-      const nextIndex = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
-      if (nextIndex !== -1) {
-        setActiveTargetIndex(nextIndex);
-      } else {
-        const anyUncaptured = targets.findIndex((t) => !t.isCaptured);
-        if (anyUncaptured !== -1) setActiveTargetIndex(anyUncaptured);
-      }
-    };
-    img.src = previewUrl;
+    if (evaluation.status === 'holding' && holdProgress === 0) {
+      feedback.triggerHapticLock();
+    }
 
-    if (nativeInputRef.current) nativeInputRef.current.value = '';
+    if (evaluation.canCapture) {
+      captureCurrentTarget();
+    }
+  }, [
+    activeTarget.isCaptured,
+    captureCurrentTarget,
+    hasOrientationSensor,
+    holdProgress,
+    isAutoCapturePaused,
+    isCapturing,
+    orientation.roll,
+    projection.angularDistance,
+    validator,
+  ]);
+
+  // Undo the last captured photo
+  const handleUndoLastCapture = () => {
+    if (capturedHistory.length === 0) return;
+
+    const lastCapturedIdx = capturedHistory[capturedHistory.length - 1];
+    setTargets((prev) =>
+      prev.map((t, idx) =>
+        idx === lastCapturedIdx
+          ? {
+              ...t,
+              isCaptured: false,
+              photoFile: undefined,
+              previewUrl: undefined,
+              orientationMetadata: undefined,
+            }
+          : t
+      )
+    );
+
+    setCapturedHistory((prev) => prev.slice(0, prev.length - 1));
+    setActiveTargetIndex(lastCapturedIdx);
+    validator.resetHold();
+    setLastBlurWarning(null);
+    feedback.playLockTick();
   };
 
   // Retake a specific target
   const retakeTarget = (index: number) => {
     setTargets((prev) =>
-      prev.map((t, idx) => (idx === index ? { ...t, isCaptured: false, photoFile: undefined, previewUrl: undefined } : t))
+      prev.map((t, idx) =>
+        idx === index
+          ? {
+              ...t,
+              isCaptured: false,
+              photoFile: undefined,
+              previewUrl: undefined,
+              orientationMetadata: undefined,
+            }
+          : t
+      )
     );
     setActiveTargetIndex(index);
+    validator.resetHold();
     setLastBlurWarning(null);
   };
 
-  // Complete capture & return photos
+  // Native camera fallback capture for devices without WebRTC permission
+  const handleNativeCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const previewUrl = URL.createObjectURL(file);
+    const timestamp = Date.now();
+    const filename = `capture_${activeTarget.id}_${activeTarget.tier}_${timestamp}.jpg`;
+    const renamedFile = new File([file], filename, { type: file.type || 'image/jpeg' });
+
+    setTargets((prev) =>
+      prev.map((t, idx) =>
+        idx === activeTargetIndex
+          ? {
+              ...t,
+              isCaptured: true,
+              photoFile: renamedFile,
+              previewUrl,
+              blurScore: 35,
+              orientationMetadata: {
+                capturedYaw: Math.round(orientation.yaw),
+                capturedPitch: Math.round(orientation.pitch),
+                capturedRoll: Math.round(orientation.roll),
+                timestamp,
+              },
+            }
+          : t
+      )
+    );
+
+    setCapturedHistory((prev) => [...prev, activeTargetIndex]);
+    const nextIndex = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
+    if (nextIndex !== -1) {
+      setActiveTargetIndex(nextIndex);
+    } else {
+      const anyUncaptured = targets.findIndex((t) => !t.isCaptured);
+      if (anyUncaptured !== -1) setActiveTargetIndex(anyUncaptured);
+    }
+
+    if (nativeInputRef.current) nativeInputRef.current.value = '';
+  };
+
+  // Complete and hand over captured photos to the application
   const handleFinish = () => {
     const capturedPhotos = targets
       .filter((t) => t.isCaptured && t.photoFile)
@@ -376,17 +575,10 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Categorize missing areas
-  const missingZenith = !targets.find((t) => t.tier === 'zenith')?.isCaptured;
-  const missingUpper = targets.filter((t) => t.tier === 'upper' && !t.isCaptured).length;
-  const missingHorizon = targets.filter((t) => t.tier === 'horizon' && !t.isCaptured).length;
-  const missingLower = targets.filter((t) => t.tier === 'lower' && !t.isCaptured).length;
-  const missingNadir = !targets.find((t) => t.tier === 'nadir')?.isCaptured;
-
   return (
     <div className="modal-backdrop">
       <div className="modal-content camera-guide-modal-container">
-        {/* Hidden native camera capture input */}
+        {/* Hidden native camera capture input for fallback */}
         <input
           type="file"
           ref={nativeInputRef}
@@ -396,26 +588,45 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
           onChange={handleNativeCapture}
         />
 
-        {/* Header */}
+        {/* Modal Header */}
         <div className="modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <div className="icon-badge">
-              <Camera size={22} color="#06b6d4" />
+              <Camera size={22} color="#00d4ff" />
             </div>
             <div>
-              <h2 className="modal-title">360° Spherical Camera Capture</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <h2 className="modal-title">Photo Sphere Guided Camera</h2>
+                <span className="badge" style={{ fontSize: '0.72rem', background: 'rgba(0, 212, 255, 0.1)', color: '#00d4ff', border: '1px solid rgba(0, 212, 255, 0.3)' }}>
+                  {captureMode === 'horizontal_360' ? '360° Panorama' : 'Full Sphere'}
+                </span>
+              </div>
               <p className="modal-subtitle">
-                Align the reticle with each target dot to capture full 360° × 180° coverage.
+                Align the floating target with the center reticle. Turns green and captures automatically.
               </p>
             </div>
           </div>
-          <button className="modal-close-btn" onClick={onClose} aria-label="Close modal">
-            <X size={20} />
-          </button>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {/* Mode Toggle Button */}
+            <button
+              className="btn btn-sm btn-secondary"
+              style={{ fontSize: '0.75rem', padding: '6px 10px', height: '32px' }}
+              onClick={() => handleModeChange(captureMode === 'horizontal_360' ? 'full_sphere' : 'horizontal_360')}
+              title="Switch between single-row horizontal 360° and multi-tier full sphere"
+            >
+              <Layers size={14} />
+              <span>{captureMode === 'horizontal_360' ? 'Switch to Full Sphere' : 'Switch to 360° Ring'}</span>
+            </button>
+
+            <button className="modal-close-btn" onClick={onClose} aria-label="Close modal">
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
-        {/* Live Camera Viewfinder & HUD */}
-        <div className="camera-viewfinder-wrapper">
+        {/* Live Viewfinder & Photo Sphere HUD */}
+        <div className={`camera-viewfinder-wrapper ${isFlashing ? 'camera-shutter-flash' : ''}`}>
           <video
             ref={videoRef}
             autoPlay
@@ -425,15 +636,15 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
           />
           <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-          {/* Fallback Screen when Camera is Off or Initializing */}
+          {/* Fallback Screen when Camera is Stopped or Initializing */}
           {!cameraActive && (
             <div className="camera-start-screen">
               <div className="camera-start-card">
                 <div style={{ position: 'relative', display: 'inline-block' }}>
-                  <Camera size={48} color="#06b6d4" style={{ marginBottom: '14px' }} />
+                  <Camera size={48} color="#00d4ff" style={{ marginBottom: '14px' }} />
                   {isStartingCamera && (
                     <RefreshCw
-                      size={20}
+                      size={22}
                       color="#38bdf8"
                       className="animate-spin"
                       style={{ position: 'absolute', bottom: 10, right: -8 }}
@@ -441,11 +652,11 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                   )}
                 </div>
 
-                <h3>{isStartingCamera ? 'Connecting to Camera...' : 'Browser Camera Access'}</h3>
+                <h3>{isStartingCamera ? 'Connecting to Camera...' : 'Camera Access'}</h3>
                 <p>
                   {isStartingCamera
-                    ? 'Requesting camera stream. If prompted, please click "Allow" in your browser.'
-                    : 'To capture genuine 360° photos with live directional guidance, please allow camera access or snap photos with your device camera.'}
+                    ? 'Requesting live camera stream. If prompted, please click "Allow" in your browser.'
+                    : 'To capture authentic 360° photos with live target tracking, allow camera access or snap directly with your device camera.'}
                 </p>
 
                 {cameraError && (
@@ -480,7 +691,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                     style={{ padding: '12px 20px' }}
                     onClick={() => nativeInputRef.current?.click()}
                   >
-                    <Smartphone size={18} color="#06b6d4" />
+                    <Smartphone size={18} color="#00d4ff" />
                     <span>Snap with Device Camera</span>
                   </button>
                 </div>
@@ -491,23 +702,93 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
           {/* Active Overlay HUD */}
           {cameraActive && (
             <div className="camera-hud-overlay">
-              {/* Top Status Bar in Viewfinder */}
+              {/* Top Bar: Progress, Calibrate, Sound, Pause, Overlap */}
               <div className="hud-top-bar">
-                <div className="hud-badge active-target-badge">
-                  <Compass size={14} color="#06b6d4" />
-                  <span>
-                    Target: <strong>{activeTarget.label}</strong> ({activeTarget.targetPitch >= 0 ? `+${activeTarget.targetPitch}°` : `${activeTarget.targetPitch}°`})
-                  </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <div className="hud-badge active-target-badge">
+                    <span style={{ color: '#00d4ff', fontWeight: 700 }}>
+                      Target {activeTargetIndex + 1} of {targets.length}
+                    </span>
+                    <span style={{ opacity: 0.5 }}>•</span>
+                    <span>{activeTarget.label}</span>
+                  </div>
+
+                  {hasOrientationSensor ? (
+                    <button
+                      className="hud-badge hud-action-pill"
+                      onClick={handleRecenter}
+                      title="Re-center Heading: Set current camera direction as 0° forward"
+                    >
+                      <RotateCcw size={12} color="#00d4ff" />
+                      <span>Re-center 0°</span>
+                    </button>
+                  ) : (
+                    <div className="hud-badge" style={{ color: '#f59e0b' }}>
+                      <span>Manual Alignment</span>
+                    </div>
+                  )}
+
+                  {sensorPermissionNeeded && (
+                    <button
+                      className="hud-badge hud-action-pill"
+                      style={{ background: 'rgba(0, 212, 255, 0.25)', border: '1px solid #00d4ff' }}
+                      onClick={() => void requestOrientationPermission()}
+                    >
+                      <Compass size={12} color="#00d4ff" />
+                      <span>Enable Sensors</span>
+                    </button>
+                  )}
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {/* Camera switcher if multiple cameras are available */}
+                  {/* Overlap config selector */}
+                  <select
+                    className="hud-badge"
+                    value={overlapPct}
+                    onChange={(e) => handleOverlapChange(parseFloat(e.target.value))}
+                    title="Configurable image overlap percentage"
+                    style={{ cursor: 'pointer', background: 'rgba(7, 11, 20, 0.85)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)' }}
+                  >
+                    <option value={0.30}>Overlap 30%</option>
+                    <option value={0.33}>Overlap 33%</option>
+                    <option value={0.38}>Overlap 38%</option>
+                  </select>
+
+                  {/* Sound Toggle */}
+                  <button
+                    className="hud-icon-btn"
+                    onClick={() => {
+                      const next = !soundEnabled;
+                      setSoundEnabled(next);
+                      feedback.setSoundEnabled(next);
+                    }}
+                    title={soundEnabled ? 'Mute shutter chime' : 'Enable shutter chime'}
+                  >
+                    {soundEnabled ? <Volume2 size={16} color="#00d4ff" /> : <VolumeX size={16} color="#94a3b8" />}
+                  </button>
+
+                  {/* Pause / Resume Auto-Capture */}
+                  {hasOrientationSensor && (
+                    <button
+                      className={`hud-icon-btn ${isAutoCapturePaused ? 'paused' : ''}`}
+                      onClick={() => setIsAutoCapturePaused(!isAutoCapturePaused)}
+                      title={isAutoCapturePaused ? 'Resume Auto-Capture' : 'Pause Auto-Capture'}
+                    >
+                      {isAutoCapturePaused ? <Play size={16} color="#f59e0b" /> : <Pause size={16} color="#00d4ff" />}
+                    </button>
+                  )}
+
+                  {/* Camera switcher if multiple cameras are detected */}
                   {availableCameras.length > 1 && (
                     <select
                       className="hud-badge"
-                      style={{ cursor: 'pointer', background: 'rgba(0,0,0,0.7)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)' }}
                       value={selectedDeviceId}
-                      onChange={(e) => handleSwitchCamera(e.target.value)}
+                      onChange={(e) => {
+                        setSelectedDeviceId(e.target.value);
+                        void startCamera(e.target.value);
+                      }}
+                      title="Switch camera sensor"
+                      style={{ cursor: 'pointer', background: 'rgba(7, 11, 20, 0.85)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)' }}
                     >
                       {availableCameras.map((cam, idx) => (
                         <option key={cam.deviceId || idx} value={cam.deviceId}>
@@ -517,120 +798,225 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
                     </select>
                   )}
 
+                  {/* Progress Pill */}
                   <div className="hud-badge progress-badge">
-                    <span>{capturedCount} / {targets.length} Captured ({progressPct}%)</span>
+                    <span>{capturedCount} / {targets.length} ({progressPct}%)</span>
                   </div>
                 </div>
               </div>
 
-              {/* Target Guidance Reticle */}
+              {/* 1. Center Reticle & Level Guidance (Fixed in Center) */}
               <div className="hud-center-reticle-container">
-                <div className={`hud-reticle-ring ${isAligned ? 'aligned' : ''}`}>
+                <div
+                  className={`hud-reticle-ring ${alignmentStatus === 'aligned_green' ? 'aligned' : ''} ${alignmentStatus === 'holding' ? 'holding' : ''}`}
+                >
+                  {/* 300ms Hold Progress Ring */}
+                  {holdProgress > 0 && (
+                    <svg className="hud-progress-svg" viewBox="0 0 80 80">
+                      <circle
+                        cx="40"
+                        cy="40"
+                        r="36"
+                        fill="none"
+                        stroke={alignmentStatus === 'aligned_green' ? '#10b981' : '#00d4ff'}
+                        strokeWidth="4"
+                        strokeDasharray={226}
+                        strokeDashoffset={226 - (226 * holdProgress) / 100}
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  )}
                   <div className="hud-reticle-crosshair-h" />
                   <div className="hud-reticle-crosshair-v" />
                   <div className="hud-reticle-dot" />
                 </div>
-                <div className="hud-target-guidance-text">
-                  {activeTarget.description}
+
+                {/* Level Horizon Bar (Roll indicator) */}
+                {hasOrientationSensor && (
+                  <div className="hud-level-indicator" title="Hold phone level horizontally">
+                    <div
+                      className={`hud-level-line ${Math.abs(orientation.roll) < 5 ? 'level' : ''}`}
+                      style={{ transform: `rotate(${-orientation.roll}deg)` }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Photo Sphere Floating Target Circle (Moves across viewfinder) */}
+              {projection.isInView ? (
+                <div
+                  className={`hud-photosphere-target ${alignmentStatus === 'aligned_green' ? 'aligned-green' : ''} ${alignmentStatus === 'holding' ? 'holding' : ''}`}
+                  style={{
+                    left: `${projection.screenX}%`,
+                    top: `${projection.screenY}%`,
+                  }}
+                >
+                  {alignmentStatus === 'aligned_green' ? (
+                    <Check size={26} color="#ffffff" strokeWidth={3} />
+                  ) : (
+                    <div className="target-bullseye-dot" />
+                  )}
+                </div>
+              ) : (
+                /* 3. Off-Screen Directional Edge Arrow (Guides user towards target) */
+                <div
+                  className="hud-edge-arrow-container"
+                  style={{
+                    left: `${projection.screenX}%`,
+                    top: `${projection.screenY}%`,
+                  }}
+                >
+                  <div
+                    className="edge-arrow-disc"
+                    style={{
+                      transform: `rotate(${projection.edgeArrowAngle}deg)`,
+                    }}
+                  >
+                    <ArrowRight size={22} color="#00d4ff" />
+                  </div>
+                  <div className="edge-distance-pill">
+                    {Math.round(projection.angularDistance)}°
+                  </div>
+                </div>
+              )}
+
+              {/* Direction Guidance Banner */}
+              <div className="hud-instruction-card">
+                <div className="hud-primary-instruction">
+                  {alignmentStatus === 'aligned_green'
+                    ? 'Capturing!'
+                    : alignmentStatus === 'holding'
+                    ? 'Hold Steady...'
+                    : projection.directionHint}
+                </div>
+                <div className="hud-secondary-hint">
+                  {hasOrientationSensor
+                    ? `Align circle with center reticle • Pitch: ${Math.round(orientation.pitch)}° | Yaw: ${Math.round(orientation.yaw)}°`
+                    : activeTarget.instruction}
                 </div>
               </div>
 
-              {/* Bottom Shutter & Controls Bar */}
+              {/* Bottom Control Bar: Undo, Shutter, Next, Retake */}
               <div className="hud-bottom-controls">
+                {/* Undo Button */}
+                <button
+                  className="hud-nav-btn"
+                  onClick={handleUndoLastCapture}
+                  disabled={capturedHistory.length === 0}
+                  style={{ opacity: capturedHistory.length === 0 ? 0.35 : 1 }}
+                  title="Undo last captured photo"
+                  aria-label="Undo last photo"
+                >
+                  <RotateCcw size={20} />
+                </button>
+
                 {/* Previous Target */}
                 <button
                   className="hud-nav-btn"
                   onClick={() => setActiveTargetIndex((prev) => (prev > 0 ? prev - 1 : targets.length - 1))}
-                  title="Previous target"
+                  title="Previous angle"
+                  aria-label="Previous angle"
                 >
-                  <ChevronLeft size={20} />
+                  <ChevronLeft size={22} />
                 </button>
 
-                {/* Shutter Button */}
-                <button
-                  className={`hud-shutter-btn ${activeTarget.isCaptured ? 'captured' : ''}`}
-                  onClick={captureCurrentTarget}
-                  disabled={isCapturing}
-                  aria-label="Capture photo"
-                >
-                  <div className="hud-shutter-inner">
-                    {activeTarget.isCaptured ? (
-                      <Check size={28} color="#10b981" />
-                    ) : (
-                      <div className="hud-shutter-circle" />
-                    )}
-                  </div>
-                </button>
+                {/* Shutter Button (Auto / Manual Tap) */}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                  <button
+                    className={`hud-shutter-btn ${activeTarget.isCaptured ? 'captured' : ''} ${isCapturing ? 'capturing' : ''}`}
+                    onClick={captureCurrentTarget}
+                    disabled={isCapturing}
+                    aria-label={activeTarget.isCaptured ? 'Retake photo' : 'Capture photo'}
+                    title={activeTarget.isCaptured ? 'Angle captured - tap to retake' : 'Tap to capture photo manually'}
+                  >
+                    <div className="hud-shutter-inner">
+                      {activeTarget.isCaptured ? (
+                        <Check size={28} color="#10b981" />
+                      ) : (
+                        <div className="hud-shutter-circle" />
+                      )}
+                    </div>
+                  </button>
+                  <span style={{ fontSize: '0.68rem', color: '#cbd5e1', textShadow: '0 1px 3px rgba(0,0,0,0.8)' }}>
+                    {activeTarget.isCaptured
+                      ? 'Captured'
+                      : isAutoCapturePaused
+                      ? 'Manual Shutter'
+                      : 'Auto-Align / Tap'}
+                  </span>
+                </div>
 
-                {/* Next Target */}
+                {/* Next Uncaptured Target */}
                 <button
                   className="hud-nav-btn"
-                  onClick={() => setActiveTargetIndex((prev) => (prev < targets.length - 1 ? prev + 1 : 0))}
-                  title="Next target"
+                  onClick={() => {
+                    const nextUncaptured = targets.findIndex((t, idx) => idx > activeTargetIndex && !t.isCaptured);
+                    if (nextUncaptured !== -1) {
+                      setActiveTargetIndex(nextUncaptured);
+                    } else {
+                      setActiveTargetIndex((prev) => (prev < targets.length - 1 ? prev + 1 : 0));
+                    }
+                  }}
+                  title="Skip to next target"
+                  aria-label="Next angle"
                 >
-                  <ChevronRight size={20} />
+                  <ChevronRight size={22} />
                 </button>
               </div>
             </div>
           )}
         </div>
 
-        {/* Warning Toast if Blurry */}
+        {/* Warning Toast if Photo is Blurry */}
         {lastBlurWarning && (
-          <div className="coverage-notice-card alert" style={{ margin: '12px 20px 0', padding: '10px 14px' }}>
+          <div className="coverage-notice-card alert" style={{ margin: '10px 0 0', padding: '10px 14px' }}>
             <AlertTriangle size={18} color="#f59e0b" style={{ flexShrink: 0 }} />
             <div style={{ fontSize: '0.82rem', color: '#fbbf24' }}>{lastBlurWarning}</div>
           </div>
         )}
 
-        {/* Spherical Target Dots Grid & Missing Areas Overview */}
-        <div className="camera-target-matrix-section">
-          <div className="matrix-header">
-            <h4>Spherical Capture Grid (18 Angles)</h4>
-            <span className="matrix-hint">Click any dot to aim camera at that angle</span>
+        {/* Target Coverage Radar Section */}
+        <div className="camera-coverage-radar-section">
+          <div className="radar-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Compass size={18} color="#00d4ff" />
+              <h4>{captureMode === 'horizontal_360' ? '360° Horizontal Ring Progress' : 'Spherical 360° × 180° Radar'}</h4>
+            </div>
+            <span className="radar-status-text">
+              {capturedCount === targets.length
+                ? 'Full 360° Coverage Complete!'
+                : `${capturedCount} of ${targets.length} targets captured`}
+            </span>
           </div>
 
-          <div className="target-dots-pill-grid">
+          {/* Visual Step Timeline dots */}
+          <div className="guided-step-timeline">
             {targets.map((t, idx) => {
               const isActive = idx === activeTargetIndex;
               return (
                 <button
                   key={t.id}
-                  className={`target-dot-pill ${t.isCaptured ? 'captured' : ''} ${isActive ? 'active' : ''}`}
+                  className={`timeline-dot-btn ${t.isCaptured ? 'captured' : ''} ${isActive ? 'active' : ''}`}
                   onClick={() => (t.isCaptured && isActive ? retakeTarget(idx) : setActiveTargetIndex(idx))}
-                  title={t.isCaptured && isActive ? 'Click to retake this angle' : 'Click to aim at this angle'}
+                  title={`Target ${idx + 1}: ${t.label} (${t.isCaptured ? 'Captured - click to retake' : 'Click to aim'})`}
+                  aria-label={`Target ${idx + 1}: ${t.label}`}
                 >
-                  <div className="dot-indicator">
-                    {t.isCaptured ? <Check size={12} color="#10b981" /> : <div className="dot-empty" />}
-                  </div>
-                  <span className="dot-label">{t.label}</span>
+                  {t.isCaptured ? (
+                    <CheckCircle2 size={16} color="#10b981" />
+                  ) : isActive ? (
+                    <div className="timeline-active-glow" />
+                  ) : (
+                    <Circle size={12} color="#64748b" />
+                  )}
                 </button>
               );
             })}
           </div>
-
-          {/* Missing Coverage Summary */}
-          <div className="missing-coverage-summary">
-            <span className="summary-title">Missing Areas:</span>
-            {capturedCount === targets.length ? (
-              <span className="summary-ok">
-                <Check size={14} color="#10b981" /> Full 360° × 180° sphere covered!
-              </span>
-            ) : (
-              <div className="missing-tags-list">
-                {missingZenith && <span className="missing-tag">Sky Zenith (+75°)</span>}
-                {missingUpper > 0 && <span className="missing-tag">{missingUpper} Upper Sky</span>}
-                {missingHorizon > 0 && <span className="missing-tag">{missingHorizon} Horizon (0°)</span>}
-                {missingLower > 0 && <span className="missing-tag">{missingLower} Lower Ground</span>}
-                {missingNadir && <span className="missing-tag">Ground Nadir (-75°)</span>}
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Modal Footer Actions */}
-        <div className="modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', gap: '8px' }}>
+        <div className="modal-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '16px', flexWrap: 'wrap', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
             <button
               className="btn btn-secondary"
               onClick={() => {
@@ -640,6 +1026,7 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
             >
               Cancel
             </button>
+
             <button
               className="btn btn-outline"
               onClick={() => nativeInputRef.current?.click()}
@@ -648,18 +1035,36 @@ export const CameraGuideModal: React.FC<CameraGuideModalProps> = ({
               <Smartphone size={16} />
               <span>Snap with Device Camera</span>
             </button>
+
+            {capturedCount > 0 && (
+              <button
+                className="btn btn-outline"
+                style={{ color: '#f43f5e', borderColor: 'rgba(244, 63, 94, 0.3)' }}
+                onClick={() => {
+                  setTargets(planner.generateTargets());
+                  setActiveTargetIndex(0);
+                  setCapturedHistory([]);
+                }}
+                title="Reset all captured camera angles"
+              >
+                Reset All
+              </button>
+            )}
           </div>
 
           <button
             className="btn btn-primary"
             onClick={handleFinish}
             disabled={capturedCount === 0}
+            style={{ minWidth: '180px' }}
           >
             <Check size={18} />
-            <span>Use {capturedCount} Captured Photos</span>
+            <span>Use {capturedCount} Photos for Stitching</span>
           </button>
         </div>
       </div>
     </div>
   );
 };
+
+export default CameraGuideModal;

@@ -1,6 +1,6 @@
 import type { HealthData, ProcessingSettings, StitchResult, PhotoCheckResult } from '../types';
 
-const API_BASE = '';
+const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, '')) || '';
 
 export async function fetchHealth(): Promise<HealthData> {
   const res = await fetch(`${API_BASE}/api/health`);

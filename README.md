@@ -6,6 +6,7 @@ An advanced, full-stack 360° panoramic stitching and viewing studio. Convert mu
 
 ## ✨ Features
 
+- **🎯 Photo Sphere Guided Camera System:** Dynamic target-alignment capture workflow. Follows floating circular targets that glide across the camera viewfinder and turn emerald green upon steady alignment, with directional edge-tracking arrows, haptic feedback, audio chime, auto-capture, multi-step undo, and configurable 30–35% overlap.
 - **📸 360° Multi-Tier Photo Stitcher:** Stitch multi-row photos (Horizon, Sky/Zenith, Nadir/Ground) into a spherical equirectangular panorama.
 - **🎥 Rotational Video Extraction:** Extract keyframes from 360° rotational camera recordings using FFmpeg with blur rejection and duplicate filtering.
 - **👁️ Interactive 360° Viewer:** High-performance in-browser panorama exploration with mouse drag, zoom, auto-rotation, and full-screen view.
@@ -69,6 +70,19 @@ npm run dev -- --host
 Frontend will run on:
 - Local: `http://localhost:5173/`
 - Network: `http://<your-lan-ip>:5173/`
+
+### 📱 Android Phone Live Testing Guide
+
+To test the guided 360° capture camera on an actual Android device:
+1. **Option A (Chrome USB Port-Forwarding — Recommended for Full Native WebRTC):**
+   - Connect your Android phone to your PC via USB with USB debugging enabled.
+   - In desktop Chrome, open `chrome://inspect/#devices`.
+   - Under **Port forwarding**, map port `5173` to `localhost:5173`.
+   - On your phone's Chrome browser, navigate to `http://localhost:5173/`.
+   - Android Chrome treats `localhost` as a secure origin, granting instant rear-camera, 60fps orientation sensors, and haptic feedback.
+2. **Option B (Same Wi-Fi Network):**
+   - On the same Wi-Fi, open `http://<your-lan-ip>:5173/` on your phone.
+   - For camera WebRTC over LAN, enable `chrome://flags/#unsafely-treat-insecure-origin-as-secure` with `http://<your-lan-ip>:5173` in Chrome on Android, or use the built-in **"Snap with Device Camera"** fallback button.
 
 ---
 

@@ -1,0 +1,8 @@
+{
+  "name": "laveon-studio-360-root",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "npm --prefix frontend install && npm --prefix frontend run build"
+  }
+}

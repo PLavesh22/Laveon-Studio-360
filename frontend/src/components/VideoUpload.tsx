@@ -84,6 +84,13 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
     }
   };
 
+  const handleKeyDownDropzone = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      fileInputRef.current?.click();
+    }
+  };
+
   const handleVideoLoadedMetadata = () => {
     if (videoPreviewRef.current) {
       setVideoDuration(videoPreviewRef.current.duration);
@@ -102,31 +109,28 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
   };
 
   const formatDuration = (sec: number | null) => {
-    if (sec === null || isNaN(sec)) return 'Calculating...';
+    if (sec === null || isNaN(sec)) return 'Calculating…';
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
   return (
-    <div className="glass-panel" style={{ padding: '24px' }}>
+    <div className="glass-panel" style={{ padding: '22px' }} id="video-workspace-panel" role="region" aria-label="Video Sweep Workspace">
       <div className="section-title-wrap">
         <h3 className="section-title">
-          <Film size={20} color="#06b6d4" />
-          <span>1. Video Source</span>
+          <Film size={18} color="#06b6d4" aria-hidden="true" />
+          <span>1. Rotational Video Source</span>
         </h3>
         <span className="section-badge">MP4, MOV, AVI</span>
       </div>
 
       {/* Error Alert */}
       {errorMessage && (
-        <div
-          className="coverage-notice-card alert"
-          style={{ marginBottom: '16px' }}
-        >
-          <AlertCircle size={20} color="#f43f5e" />
+        <div className="coverage-notice-card alert" style={{ marginBottom: '14px' }} role="alert">
+          <AlertCircle size={18} color="#f43f5e" style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
           <div>
-            <div className="notice-title" style={{ color: '#f43f5e' }}>Invalid File</div>
+            <div className="notice-title" style={{ color: '#f43f5e' }}>Invalid Video</div>
             <div className="notice-body">{errorMessage}</div>
           </div>
         </div>
@@ -140,6 +144,10 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
+          onKeyDown={handleKeyDownDropzone}
+          role="button"
+          tabIndex={0}
+          aria-label="Upload rotational sweep video"
         >
           <input
             ref={fileInputRef}
@@ -148,30 +156,32 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
             style={{ display: 'none' }}
             onChange={handleInputChange}
             disabled={disabled || isProcessing}
+            aria-hidden="true"
           />
-          <div className="upload-icon-circle">
-            <UploadCloud size={30} />
+          <div className="upload-icon-circle" aria-hidden="true">
+            <UploadCloud size={26} />
           </div>
-          <div className="dropzone-prompt">Drop your rotation video here</div>
+          <div className="dropzone-prompt">Drop your rotational video here</div>
           <div className="dropzone-hint">
-            or click to browse your desktop · Max {MAX_SIZE_MB}MB
+            or click to browse from device · Max {MAX_SIZE_MB}MB
           </div>
-          <p style={{ marginTop: '14px', fontSize: '0.78rem', color: '#64748b' }}>
-            Tip: A slow, steady 360° or wide sweep with continuous overlap produces the cleanest panorama.
+          <p style={{ marginTop: '12px', fontSize: '0.78rem', color: '#64748b', lineHeight: 1.4 }}>
+            Tip: Rotate smoothly around the camera lens axis for optimal feature matching.
           </p>
 
           {onLoadDemoVideo && (
             <button
               type="button"
-              className="btn btn-secondary"
+              className="btn btn-secondary btn-touch"
               style={{ marginTop: '14px', alignSelf: 'center' }}
               onClick={(e) => {
                 e.stopPropagation();
                 onLoadDemoVideo();
               }}
               disabled={isLoadingDemo || isProcessing}
+              aria-label="Load pre-rendered 360 rotating camera sample video"
             >
-              <span>{isLoadingDemo ? 'Loading Sample Video...' : 'Load Sample 360 Video'}</span>
+              <span>{isLoadingDemo ? 'Loading Sample Video…' : 'Load Sample 360 Video'}</span>
             </button>
           )}
         </div>
@@ -184,6 +194,7 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
             controls
             className="video-player-frame"
             onLoadedMetadata={handleVideoLoadedMetadata}
+            aria-label="Selected rotation video preview"
           />
           <div className="video-meta-bar">
             <div>
@@ -192,12 +203,12 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
               </div>
               <div className="file-details-chips" style={{ marginTop: '4px' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                  <HardDrive size={12} />
+                  <HardDrive size={12} aria-hidden="true" />
                   {formatFileSize(selectedFile.size)}
                 </span>
                 <span>·</span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                  <Clock size={12} />
+                  <Clock size={12} aria-hidden="true" />
                   {formatDuration(videoDuration)}
                 </span>
                 {videoResolution && (
@@ -210,13 +221,15 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
             </div>
 
             <button
+              type="button"
               className="btn btn-outline"
-              style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+              style={{ padding: '6px 12px', fontSize: '0.8rem', minHeight: '36px' }}
               onClick={onClearFile}
               disabled={isProcessing}
-              title="Remove this video and pick another"
+              title="Remove this video and choose another"
+              aria-label="Change selected video"
             >
-              <X size={14} />
+              <X size={14} aria-hidden="true" />
               <span>Change</span>
             </button>
           </div>
@@ -225,3 +238,5 @@ export const VideoUpload: React.FC<VideoUploadProps> = ({
     </div>
   );
 };
+
+export default VideoUpload;
