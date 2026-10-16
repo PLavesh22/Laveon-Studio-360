@@ -11,9 +11,11 @@ TEMP_DIR_ROOT = BACKEND_DIR / "temp"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_DIR_ROOT.mkdir(parents=True, exist_ok=True)
 
-# Application Metadata
+# Application Metadata & Server Configuration
 APP_NAME = "Laveon Studio 360"
 APP_VERSION = "1.0.0"
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
 
 # Upload and Validation Settings
 MAX_UPLOAD_SIZE_BYTES = 250 * 1024 * 1024  # 250 MB

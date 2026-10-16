@@ -1,12 +1,25 @@
-# Dependencies
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
 node_modules/
-frontend/node_modules/
+dist/
+build/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Python virtual environment & cache
 .venv/
 backend/.venv/
 venv/
 env/
-
-# Python cache & testing
 __pycache__/
 */__pycache__/
 *.py[cod]
@@ -15,13 +28,11 @@ __pycache__/
 backend/.pytest_cache/
 *.egg-info/
 
-# Frontend build outputs
-dist/
+# Frontend subproject build outputs
 frontend/dist/
-dist-ssr/
 frontend/dist-ssr/
-.vite/
 frontend/.vite/
+frontend/node_modules/
 
 # Backend temporary files & processing outputs
 backend/temp/*
@@ -32,18 +43,6 @@ backend/storage/*.mp4
 !backend/storage/sample_rotating_camera.mp4
 !backend/storage/sample_photos_360/
 !backend/storage/.gitkeep
-
-# Logs
-logs/
-*.log
-npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
-
-# Environment & local credentials
-.env
-.env.local
-.env.*.local
 
 # OS & Editor files
 .DS_Store
