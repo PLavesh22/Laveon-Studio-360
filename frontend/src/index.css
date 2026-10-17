@@ -2113,8 +2113,9 @@ code, pre {
    ========================================================================== */
 
 .camera-guide-modal-container {
-  max-width: 880px !important;
-  width: 95vw !important;
+  max-width: 1280px !important;
+  width: 96vw !important;
+  height: 94vh;
   max-height: 94vh !important;
   display: flex;
   flex-direction: column;
@@ -2125,9 +2126,10 @@ code, pre {
 .camera-viewfinder-wrapper {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: auto;
+  height: min(62vh, 680px);
   min-height: 380px;
-  max-height: 520px;
+  max-height: 680px;
   background: #040711;
   border-radius: 14px;
   overflow: hidden;
@@ -2307,6 +2309,25 @@ code, pre {
   justify-content: center;
   pointer-events: none;
   z-index: 8;
+}
+
+.target-rectangular-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(62%, 440px);
+  height: min(58%, 300px);
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(16, 185, 129, 0.55);
+  border-radius: 12px;
+  box-shadow: 0 0 28px rgba(16, 185, 129, 0.08), inset 0 0 24px rgba(16, 185, 129, 0.05);
+  pointer-events: none;
+  z-index: 7;
+}
+
+.target-rectangular-frame.aligned {
+  border-color: rgba(16, 185, 129, 0.95);
+  box-shadow: 0 0 32px rgba(16, 185, 129, 0.22), inset 0 0 24px rgba(16, 185, 129, 0.12);
 }
 
 .hud-reticle-ring {
@@ -3086,8 +3107,26 @@ code, pre {
 /* Mobile Devices (<= 640px) */
 @media (max-width: 640px) {
   .camera-guide-modal-container {
-    padding: 14px 12px !important;
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    padding: max(env(safe-area-inset-top), 8px) 10px max(env(safe-area-inset-bottom), 8px) !important;
   }
+
+  .camera-guide-backdrop { padding: 0; align-items: stretch; }
+
+  .camera-viewfinder-wrapper {
+    flex: 1 1 auto;
+    aspect-ratio: auto;
+    min-height: 240px;
+    max-height: none;
+  }
+
+  .camera-guide-modal-container .modal-header { margin-bottom: 6px; }
+  .camera-guide-modal-container .modal-footer { margin-top: 8px !important; }
+  .camera-guide-modal-container .camera-coverage-radar-section { padding: 8px; margin-top: 8px; }
+  .camera-guide-modal-container .guided-step-timeline { overflow-x: auto; flex-wrap: nowrap; }
 
   .target-rectangular-frame {
     width: 95px;
@@ -3107,6 +3146,8 @@ code, pre {
   .hud-primary-instruction {
     font-size: 0.85rem;
   }
+
+  .target-rectangular-frame { width: 78%; height: 48%; }
 
   .hud-shutter-btn {
     width: 58px;
@@ -3201,5 +3242,412 @@ code, pre {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* Reference-style portrait capture and onboarding screens */
+.onboarding-reference {
+  background: #00140d;
+  backdrop-filter: none;
+  padding: max(env(safe-area-inset-top), 14px) max(env(safe-area-inset-right), 16px)
+    max(env(safe-area-inset-bottom), 14px) max(env(safe-area-inset-left), 16px);
+}
+
+.tutorial-shell {
+  position: relative;
+  width: min(100%, 460px);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 50px 20px 18px;
+  color: #e9fff4;
+  background: #00140d;
+}
+
+.tutorial-close {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  width: 38px;
+  height: 38px;
+  border: 0;
+  background: transparent;
+  color: rgba(229, 255, 242, 0.68);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.tutorial-art {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 160px;
+  max-height: 44vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #26e99a;
+}
+
+.tutorial-art svg {
+  width: min(100%, 340px);
+  height: 100%;
+  max-height: 280px;
+  overflow: visible;
+  filter: drop-shadow(0 0 8px rgba(38, 233, 154, 0.14));
+}
+
+.tutorial-copy {
+  width: min(100%, 380px);
+  min-height: 78px;
+  margin: 24px 0 16px;
+  color: rgba(238, 255, 246, 0.9);
+  text-align: center;
+  font-size: clamp(1.05rem, 4.9vw, 1.32rem);
+  line-height: 1.45;
+  font-weight: 400;
+  animation: tutorialCopyIn 260ms ease both;
+}
+
+@keyframes tutorialCopyIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.tutorial-status {
+  min-height: 46px;
+  width: min(100%, 360px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  text-align: center;
+  font-size: 0.78rem;
+}
+
+.tutorial-camera-status,
+.tutorial-camera-ready,
+.tutorial-error {
+  width: 100%;
+  margin: 0;
+  color: rgba(222, 245, 232, 0.66);
+}
+
+.tutorial-camera-ready {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #3cec9b;
+}
+
+.tutorial-error { color: #ffb4ae; }
+
+.tutorial-camera-button,
+.tutorial-sensor-button {
+  min-height: 34px;
+  padding: 0 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #dfffee;
+  border: 1px solid rgba(48, 231, 149, 0.45);
+  border-radius: 22px;
+  background: rgba(20, 112, 72, 0.24);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tutorial-camera-button:disabled { opacity: 0.55; cursor: wait; }
+
+.tutorial-sensor-button {
+  min-height: 30px;
+  border-color: rgba(226, 255, 239, 0.28);
+  background: transparent;
+  font-size: 0.74rem;
+}
+
+.tutorial-step-dots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 4px 0 24px;
+}
+
+.tutorial-step-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(99, 193, 145, 0.26);
+  transition: width 180ms ease, background 180ms ease;
+}
+
+.tutorial-step-dots span.complete,
+.tutorial-step-dots span.active { background: #34e997; }
+
+.tutorial-step-dots span.active {
+  width: 10px;
+  height: 10px;
+  box-shadow: 0 0 12px rgba(52, 233, 151, 0.45);
+}
+
+.tutorial-navigation {
+  width: min(100%, 360px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.tutorial-outline-button,
+.tutorial-next-button {
+  min-width: 112px;
+  height: 52px;
+  padding: 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 28px;
+  font-size: 1rem;
+  font-weight: 450;
+  cursor: pointer;
+}
+
+.tutorial-outline-button {
+  color: rgba(242, 255, 248, 0.92);
+  border: 1px solid rgba(231, 255, 241, 0.86);
+  background: transparent;
+}
+
+.tutorial-next-button {
+  color: #102118;
+  border: 1px solid #e4eee8;
+  background: #e4eee8;
+}
+
+.tutorial-next-button:disabled {
+  color: rgba(16, 33, 24, 0.55);
+  border-color: #86928b;
+  background: #86928b;
+  cursor: not-allowed;
+}
+
+.camera-guide-modal-container.camera-capture-active .camera-viewfinder-wrapper {
+  width: min(100%, 480px);
+  aspect-ratio: 9 / 16;
+  height: min(70vh, 760px);
+  min-height: 480px;
+  max-height: 760px;
+  margin: 0 auto;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 18px 50px rgba(0, 0, 0, 0.42);
+}
+
+.camera-capture-active .camera-video-element { object-fit: cover; }
+
+.camera-capture-active .camera-hud-overlay {
+  padding: 12px 12px max(14px, env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.48), transparent 18%, transparent 63%, rgba(0, 0, 0, 0.78));
+}
+
+.camera-capture-active .hud-badge,
+.camera-capture-active .hud-icon-btn,
+.camera-capture-active .hud-nav-btn {
+  color: #f2fff8;
+  background: rgba(0, 17, 11, 0.72);
+  border-color: rgba(222, 255, 237, 0.36);
+}
+
+.camera-capture-active .hud-progress-summary-text {
+  color: rgba(241, 255, 247, 0.86);
+  background: transparent;
+  border: 0;
+  font-size: 0.75rem;
+}
+
+.camera-capture-active .target-rectangular-frame {
+  width: min(52%, 280px);
+  height: 44%;
+  border: 1.5px solid rgba(255, 255, 255, 0.96);
+  border-radius: 0;
+  box-shadow: 0 0 1px rgba(0, 0, 0, 0.7);
+  z-index: 9;
+}
+
+.camera-capture-active .target-rectangular-frame.aligned {
+  border-color: #fff;
+  box-shadow: 0 0 14px rgba(220, 255, 237, 0.24);
+}
+
+.camera-capture-active .hud-target-panel {
+  position: absolute;
+  width: clamp(142px, 46%, 226px);
+  height: 43%;
+  min-height: 206px;
+  max-height: 340px;
+  z-index: 8;
+  pointer-events: none;
+  background: rgba(31, 255, 132, 0.84);
+  -webkit-mask-image: radial-gradient(circle 54px at 50% 50%, transparent 0 52px, #000 54px);
+  mask-image: radial-gradient(circle 54px at 50% 50%, transparent 0 52px, #000 54px);
+  filter: drop-shadow(0 7px 14px rgba(0, 0, 0, 0.2));
+  transition: left 160ms ease-out, top 160ms ease-out, background-color 180ms ease, opacity 180ms ease;
+  opacity: 0.78;
+}
+
+.camera-capture-active .hud-target-panel.approaching { opacity: 0.88; }
+
+.camera-capture-active .hud-target-panel.aligned {
+  opacity: 0.96;
+  background: #20f985;
+  filter: drop-shadow(0 0 18px rgba(22, 255, 138, 0.28));
+}
+
+.camera-capture-active .hud-center-reticle-container { z-index: 10; }
+
+.camera-capture-active .hud-hold-marker {
+  position: relative;
+  width: clamp(78px, 22vw, 104px);
+  height: clamp(78px, 22vw, 104px);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff;
+  color: #08140e;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.24);
+  font-size: 1.05rem;
+  font-weight: 750;
+  letter-spacing: 0.045em;
+  transition: transform 180ms ease;
+}
+
+.camera-capture-active .hud-hold-marker.aligned { transform: scale(1.04); }
+
+.camera-capture-active .hud-target-pointer {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 32px;
+  height: 28px;
+  background: #fff;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  transform-origin: 0 50%;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.28));
+}
+
+.camera-capture-active .target-countdown-svg {
+  position: absolute;
+  inset: -8px;
+  width: calc(100% + 16px);
+  height: calc(100% + 16px);
+  pointer-events: none;
+}
+
+.camera-capture-active .hud-level-indicator { opacity: 0.5; }
+
+.camera-capture-active .hud-instruction-card {
+  color: #effff6;
+  background: rgba(0, 15, 9, 0.6);
+  border: 1px solid rgba(232, 255, 242, 0.2);
+  border-radius: 12px;
+  padding: 7px 12px;
+  box-shadow: none;
+}
+
+.camera-capture-active .hud-primary-instruction { font-size: 0.9rem; }
+
+.camera-capture-active .hud-secondary-hint {
+  color: rgba(238, 255, 245, 0.76);
+  font-size: 0.72rem;
+}
+
+.hud-capture-dots {
+  display: flex;
+  max-width: min(100%, 340px);
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 6px;
+  scrollbar-width: none;
+}
+
+.hud-capture-dots::-webkit-scrollbar { display: none; }
+
+.hud-capture-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(55, 225, 143, 0.3);
+  box-shadow: 0 0 0 1px rgba(55, 225, 143, 0.12);
+  cursor: pointer;
+}
+
+.hud-capture-dot.active {
+  width: 10px;
+  height: 10px;
+  background: #36eda0;
+  box-shadow: 0 0 12px rgba(54, 237, 160, 0.7);
+}
+
+.hud-capture-dot.captured {
+  background: #20e68d;
+  box-shadow: 0 0 8px rgba(32, 230, 141, 0.48);
+}
+
+@media (max-width: 640px) {
+  .camera-guide-modal-container.camera-capture-active {
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    padding: max(env(safe-area-inset-top), 6px) 0 max(env(safe-area-inset-bottom), 6px) !important;
+    overflow-y: auto;
+    background: #000;
+  }
+
+  .camera-guide-modal-container.camera-capture-active > .modal-header { display: none; }
+
+  .camera-guide-modal-container.camera-capture-active .camera-viewfinder-wrapper {
+    width: 100%;
+    flex: 1 1 auto;
+    aspect-ratio: auto;
+    height: auto;
+    min-height: 310px;
+    max-height: none;
+    margin: 0;
+  }
+
+  .camera-guide-modal-container.camera-capture-active .camera-coverage-radar-section { display: none; }
+
+  .camera-guide-modal-container.camera-capture-active .modal-footer {
+    margin: 4px 10px 0 !important;
+    padding-bottom: 4px;
+  }
+
+  .camera-capture-active .hud-top-bar { align-items: flex-start; }
+  .camera-capture-active .hud-top-bar > div { gap: 5px !important; }
+
+  .camera-capture-active .active-target-badge {
+    max-width: 54vw;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .camera-capture-active .hud-target-panel {
+    width: clamp(142px, 46%, 210px);
+    height: 42%;
   }
 }

@@ -13,6 +13,7 @@ export interface OrientationData {
   rawGamma: number;  // Raw device gamma
   isCalibrated: boolean;
   screenAngle: number;
+  timestamp: number;
 }
 
 export type OrientationListener = (data: OrientationData) => void;
@@ -21,14 +22,16 @@ export type SensorStatus = 'checking' | 'active' | 'permission_needed' | 'unsupp
 export class OrientationTracker {
   private listeners: Set<OrientationListener> = new Set();
   private baselineAlpha: number | null = null;
+  private baselinePitch: number | null = null;
+  private baselineRoll: number | null = null;
   private isListening = false;
   private hasSensor = false;
-  private lastRawAlpha: number = 0;
 
   // Smoothed orientation state (EMA)
   private smoothedYaw = 0;
   private smoothedPitch = 0;
   private smoothedRoll = 0;
+  private latestReading: OrientationData | null = null;
   private isFirstReading = true;
 
   // Smoothing factor: higher = more responsive, lower = smoother (0.28 is ideal for 60Hz)
@@ -41,7 +44,6 @@ export class OrientationTracker {
     }
 
     this.hasSensor = true;
-    this.lastRawAlpha = e.alpha;
 
     // 1. Screen orientation compensation
     const screenAngle = this.getScreenOrientationAngle();
@@ -65,20 +67,21 @@ export class OrientationTracker {
       rawPitch = -(90 - e.beta);
       rawRoll = -e.gamma;
     }
+    this.latestRawPitch = rawPitch;
+    this.latestRawRoll = rawRoll;
 
-    // 2. Relative baseline calibration (straight forward = 0° yaw)
-    if (this.baselineAlpha === null) {
-      this.baselineAlpha = rawYaw;
-    }
-
-    // Compute relative yaw [0, 360)
-    let relativeYaw = (rawYaw - this.baselineAlpha + 360) % 360;
+    // Until the user starts capture, expose sensor availability without pretending
+    // that an arbitrary page-load heading is the capture baseline.
+    const isCalibrated = this.baselineAlpha !== null && this.baselinePitch !== null && this.baselineRoll !== null;
+    let relativeYaw = isCalibrated ? this.normalizeAngle(rawYaw - this.baselineAlpha!) : 0;
+    const relativePitch = isCalibrated ? rawPitch - this.baselinePitch! : 0;
+    const relativeRoll = isCalibrated ? this.normalizeAngle(rawRoll - this.baselineRoll! + 180) - 180 : 0;
 
     // 3. Smooth angle differences to prevent visual jitter
     if (this.isFirstReading) {
       this.smoothedYaw = relativeYaw;
-      this.smoothedPitch = rawPitch;
-      this.smoothedRoll = rawRoll;
+      this.smoothedPitch = relativePitch;
+      this.smoothedRoll = relativeRoll;
       this.isFirstReading = false;
     } else {
       // Angular distance for yaw with 0/360 wrap-around
@@ -87,8 +90,11 @@ export class OrientationTracker {
       while (dyaw < -180) dyaw += 360;
       this.smoothedYaw = (this.smoothedYaw + dyaw * this.smoothingAlpha + 360) % 360;
 
-      this.smoothedPitch += (rawPitch - this.smoothedPitch) * this.smoothingAlpha;
-      this.smoothedRoll += (rawRoll - this.smoothedRoll) * this.smoothingAlpha;
+      this.smoothedPitch += (relativePitch - this.smoothedPitch) * this.smoothingAlpha;
+      let droll = relativeRoll - this.smoothedRoll;
+      while (droll > 180) droll -= 360;
+      while (droll < -180) droll += 360;
+      this.smoothedRoll += droll * this.smoothingAlpha;
     }
 
     const orientationData: OrientationData = {
@@ -98,12 +104,18 @@ export class OrientationTracker {
       rawAlpha: e.alpha,
       rawBeta: e.beta,
       rawGamma: e.gamma,
-      isCalibrated: this.baselineAlpha !== null,
+      isCalibrated,
       screenAngle,
+      timestamp: Date.now(),
     };
+    this.latestReading = orientationData;
 
     this.listeners.forEach((listener) => listener(orientationData));
   };
+
+  private normalizeAngle(angle: number): number {
+    return ((angle % 360) + 360) % 360;
+  }
 
   /**
    * Returns current screen orientation angle (0, 90, 180, 270)
@@ -128,7 +140,7 @@ export class OrientationTracker {
         const response = await (window as any).DeviceOrientationEvent.requestPermission();
         return response === 'granted';
       }
-      return true; // Not required on Android or desktop
+      return typeof window !== 'undefined' && 'DeviceOrientationEvent' in window;
     } catch (err) {
       console.warn('Orientation permission error:', err);
       return false;
@@ -155,30 +167,28 @@ export class OrientationTracker {
    * Calibrates current camera orientation as 0° forward heading
    */
   public calibrate(currentAlpha?: number): void {
-    if (currentAlpha !== undefined) {
-      this.baselineAlpha = currentAlpha;
-    } else if (this.lastRawAlpha !== 0) {
-      this.baselineAlpha = this.lastRawAlpha;
-    } else {
-      this.baselineAlpha = this.smoothedYaw;
+    if (currentAlpha !== undefined) this.baselineAlpha = currentAlpha;
+    else if (this.latestReading) this.baselineAlpha = this.latestReading.rawAlpha;
+    if (this.latestReading) {
+      // Recover the absolute axes from the reading by retaining the raw event
+      // values in the tracker as the most recent uncalibrated measurements.
+      this.baselinePitch = this.latestRawPitch;
+      this.baselineRoll = this.latestRawRoll;
     }
     this.smoothedYaw = 0;
+    this.smoothedPitch = 0;
+    this.smoothedRoll = 0;
     this.isFirstReading = true;
   }
+
+  private latestRawPitch: number | null = null;
+  private latestRawRoll: number | null = null;
 
   /**
    * Re-centers the baseline yaw to current heading
    */
   public recenter(headingAlpha?: number): void {
-    if (headingAlpha !== undefined) {
-      this.baselineAlpha = headingAlpha;
-    } else if (this.lastRawAlpha !== 0) {
-      this.baselineAlpha = this.lastRawAlpha;
-    } else {
-      this.baselineAlpha = 0;
-    }
-    this.smoothedYaw = 0;
-    this.isFirstReading = true;
+    this.calibrate(headingAlpha);
   }
 
   /**
@@ -187,6 +197,7 @@ export class OrientationTracker {
   public start(): void {
     if (this.isListening || typeof window === 'undefined') return;
 
+    this.reset();
     window.addEventListener('deviceorientation', this.handleDeviceOrientation, { passive: true });
     this.isListening = true;
   }
@@ -199,6 +210,7 @@ export class OrientationTracker {
 
     window.removeEventListener('deviceorientation', this.handleDeviceOrientation);
     this.isListening = false;
+    this.reset();
   }
 
   /**
@@ -206,9 +218,6 @@ export class OrientationTracker {
    */
   public subscribe(listener: OrientationListener): () => void {
     this.listeners.add(listener);
-    if (!this.isListening) {
-      this.start();
-    }
 
     return () => {
       this.listeners.delete(listener);
@@ -222,12 +231,34 @@ export class OrientationTracker {
     return this.hasSensor;
   }
 
+  public waitForReading(timeoutMs = 1500): Promise<boolean> {
+    if (this.latestReading) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (received: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(received);
+      };
+      const unsubscribe = this.subscribe(() => finish(true));
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
+  }
+
   public reset(): void {
     this.baselineAlpha = null;
     this.isFirstReading = true;
     this.smoothedYaw = 0;
     this.smoothedPitch = 0;
     this.smoothedRoll = 0;
+    this.latestReading = null;
+    this.baselinePitch = null;
+    this.baselineRoll = null;
+    this.latestRawPitch = null;
+    this.latestRawRoll = null;
+    this.hasSensor = false;
   }
 }
 

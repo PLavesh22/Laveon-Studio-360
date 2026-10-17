@@ -3,6 +3,9 @@
  */
 import { computeDirectionalGuidance, formatProgressSummary } from './src/services/directionalGuidance.ts';
 import { AlignmentValidator } from './src/services/alignmentValidator.ts';
+import { OrientationTracker } from './src/services/orientationTracker.ts';
+import { TargetPlanner } from './src/services/targetPlanner.ts';
+import { ImageQualityAnalyzer } from './src/services/imageQualityAnalyzer.ts';
 import { CaptureCountdown } from './src/services/captureCountdown.ts';
 
 let passed = 0;
@@ -154,13 +157,90 @@ assert(formatProgressSummary(11, 12) === '11 of 12 photos captured — 1 last sh
 
 console.log('\n=== 3. Testing Alignment & Stability Detection ===');
 
-const validator = new AlignmentValidator({ toleranceDegrees: 3.5, maxAngularVelocity: 4.5 });
+const validator = new AlignmentValidator({ toleranceDegrees: 3, maxAngularVelocity: 4.5, stabilityDurationMs: 650 });
+const originalNow = Date.now;
+let testNow = originalNow();
+Date.now = () => testNow;
+const sample = (timestamp, yaw = 0, hasCameraFrame = true) => ({
+  angularDistance: 1.5, yaw, pitch: 0, roll: 0, timestamp,
+  isCalibrated: true, hasCameraFrame, isPaused: false, isCapturing: false,
+});
+const eval1 = validator.evaluate(sample(testNow));
+assert(!eval1.isReadyForCountdown, 'First sensor sample cannot arm capture without a stability interval');
+testNow += 100;
+const eval2 = validator.evaluate(sample(testNow));
+assert(eval2.isWithinTolerance && eval2.isLevel && eval2.isSteady, 'Aligned stationary sensor readings pass the angular and motion checks');
+testNow += 200;
+validator.evaluate(sample(testNow));
+testNow += 200;
+validator.evaluate(sample(testNow));
+testNow += 300;
+const eval3 = validator.evaluate(sample(testNow));
+assert(eval3.isReadyForCountdown && eval3.steadyDurationMs >= 650, 'Target arms only after at least 650 ms of stability');
+testNow += 100;
+const moved = validator.evaluate(sample(testNow, 2));
+assert(!moved.isReadyForCountdown && !moved.isSteady, 'Rotating while staying near the target resets stability');
+validator.reset();
+testNow += 100;
+const noCamera = validator.evaluate(sample(testNow, 0, false));
+assert(!noCamera.isReadyForCountdown, 'A valid orientation cannot arm capture without a live camera frame');
+Date.now = originalNow;
 
-// Test 9: Perfectly aligned and still
-const eval1 = validator.evaluate(1.5, 0, false, false, true);
-assert(eval1.isWithinTolerance && eval1.isLevel, 'Within tolerance and level');
+console.log('\n=== 4. Testing Relative Orientation Calibration & Capture Targets ===');
+const originalWindow = globalThis.window;
+const eventHandlers = new Map();
+globalThis.window = {
+  screen: { orientation: { angle: 0 } },
+  addEventListener: (name, callback) => eventHandlers.set(name, callback),
+  removeEventListener: (name) => eventHandlers.delete(name),
+};
+const tracker = new OrientationTracker();
+assert(tracker.getSensorStatus() === 'unsupported', 'Missing DeviceOrientation API reports unsupported sensors');
+assert(await tracker.requestPermission() === false, 'Unsupported sensor access does not silently succeed');
+let latestOrientation;
+const unsubscribe = tracker.subscribe((reading) => { latestOrientation = reading; });
+tracker.start();
+eventHandlers.get('deviceorientation')({ alpha: 359, beta: 90, gamma: 0 });
+assert(latestOrientation && !latestOrientation.isCalibrated, 'Sensor readings before Start Capture are not treated as a baseline');
+tracker.recenter();
+eventHandlers.get('deviceorientation')({ alpha: 1, beta: 90, gamma: 0 });
+assert(latestOrientation.isCalibrated && latestOrientation.yaw <= 2, 'Relative yaw crosses 0° without a 358° jump');
+unsubscribe();
+globalThis.window.DeviceOrientationEvent = { requestPermission: async () => 'denied' };
+assert(await new OrientationTracker().requestPermission() === false, 'Denied sensor permission is reported as unavailable');
+if (originalWindow === undefined) delete globalThis.window;
+else globalThis.window = originalWindow;
 
-console.log('\n=== 4. Testing 3-Second Countdown & Cancellation on Movement ===');
+const planner = new TargetPlanner({ mode: 'horizontal_360', stepAngle: 30 });
+assert(planner.generateTargets().length === 12, 'A 30° rotation plan includes all 12 required positions');
+
+const originalDocument = globalThis.document;
+const imageData = { data: new Uint8ClampedArray(160 * 120 * 4) };
+const fakeContext = {
+  drawImage() {},
+  getImageData: () => imageData,
+};
+globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => fakeContext }) };
+const analyzer = new ImageQualityAnalyzer();
+const darkFrame = analyzer.analyzeFrame({ getContext: () => ({}) }, 0.35);
+assert(darkFrame.exposureStatus === 'underexposed' && darkFrame.isBlurry, 'Dark, flat frames trigger exposure and blur warnings');
+for (let y = 0; y < 120; y++) {
+  for (let x = 0; x < 160; x++) {
+    const value = (x + y) % 2 ? 255 : 0;
+    const offset = (y * 160 + x) * 4;
+    imageData.data[offset] = value;
+    imageData.data[offset + 1] = value;
+    imageData.data[offset + 2] = value;
+    imageData.data[offset + 3] = 255;
+  }
+}
+const texturedFrame = analyzer.analyzeFrame({ getContext: () => ({}) }, 0.35);
+assert(texturedFrame.overlapScore === null && texturedFrame.overlapStatus === 'unverified', 'Adjacent frame overlap is not claimed without feature matching');
+assert(texturedFrame.warnings.some((warning) => warning.includes('overlap was not verified')), 'Unverified visual overlap is clearly disclosed');
+if (originalDocument === undefined) delete globalThis.document;
+else globalThis.document = originalDocument;
+
+console.log('\n=== 5. Testing 3-Second Countdown & Cancellation on Movement ===');
 
 const countdown = new CaptureCountdown(3000);
 
